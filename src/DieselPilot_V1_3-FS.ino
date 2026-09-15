@@ -222,6 +222,20 @@ uint16_t voltAlarmDeciV = VOLT_ALARM_DECIV_DEFAULT;
 uint16_t voltClearDeciV = VOLT_CLEAR_DECIV_DEFAULT;
 uint16_t voltDebounceS  = VOLT_DEBOUNCE_SEC_DEFAULT;
 
+// Progress reports while the heater burns. "Heater: RUNNING" says the state
+// changed; it does not say whether anything is getting warmer. A heater can
+// sit in RUNNING and produce no heat at all -- coked burner, fuel starvation,
+// a blocked duct -- and the ambient trend is the only thing that shows it.
+//
+// Two numbers rather than two checkboxes, in the idiom already used by
+// autoOffMin: zero on the first disables reports entirely, zero on the
+// second sends one and no more. The delay is itself worth tuning, because
+// the "not heating" warning hangs off it: too early and a cold heat
+// exchanger raises false alarms, too late and the driver has already
+// arrived.
+uint16_t reportFirstMin = 30;
+uint16_t reportRptMin   = 0;
+
 // Telegram. The bot is the only remote channel, so the chat whitelist is the
 // single thing standing between a stranger and the heater.
 bool   tgEnabled = false;
@@ -1172,6 +1186,53 @@ void updateFuel() {
     lastState = heaterStatus.state;
 }
 
+// Sends progress while the heater burns, and turns the same message into a
+// warning when the garage is not actually warming up.
+void updateProgressReport() {
+    static uint8_t  lastState    = STATE_OFF;
+    static uint32_t burnStartMs  = 0;
+    static int8_t   ambientStart = 0;
+    static uint16_t reportsSent  = 0;
+
+    if(heaterStatus.state == STATE_OFF) {
+        lastState   = STATE_OFF;
+        reportsSent = 0;
+        return;
+    }
+    if(reportFirstMin == 0) return;
+
+    if(lastState == STATE_OFF) {          // this burn just began
+        burnStartMs  = millis();
+        ambientStart = heaterStatus.ambientTemp;
+        reportsSent  = 0;
+    }
+    lastState = heaterStatus.state;
+
+    if(heaterStatus.lastUpdate == 0) return;
+
+    if(reportsSent > 0 && reportRptMin == 0) return;   // first report only
+
+    uint32_t dueMin  = reportFirstMin + (uint32_t)reportsSent * reportRptMin;
+    uint32_t burnMin = (millis() - burnStartMs) / 60000UL;
+    if(burnMin < dueMin) return;
+
+    reportsSent++;
+    int delta = heaterStatus.ambientTemp - ambientStart;
+
+    if(delta <= 0) {
+        notifyTelegram("⚠️ Running " + String(burnMin) + " min, garage still at " +
+                       String(heaterStatus.ambientTemp) + " C — not heating");
+        return;
+    }
+
+    String m = "🔥 Running " + String(burnMin) + " min\n";
+    m += "Garage: " + String(ambientStart) + " -> " +
+         String(heaterStatus.ambientTemp) + " C  (+" + String(delta) + ")\n";
+    m += "Case:   " + String(heaterStatus.caseTemp) + " C";
+    if(fuelTicks) m += "\nFuel:   ~" + String(fuelMlFromTicks(fuelTicks)) + " ml";
+    notifyTelegram(m);
+}
+
 void updateIgnition() {
     if(!ignWatching) return;
 
@@ -1802,6 +1863,8 @@ void handleAPI_Timers() {
     voltAlarmDeciV      = formNumber("voltAlarm", voltAlarmDeciV, 80, 160);
     voltClearDeciV      = formNumber("voltClear", voltClearDeciV, 80, 170);
     voltDebounceS       = formNumber("voltDeb", voltDebounceS, 1, 600);
+    reportFirstMin      = formNumber("reportFirst", reportFirstMin, 0, 600);
+    reportRptMin        = formNumber("reportRpt", reportRptMin, 0, 600);
 
     prefs.putString("ntpServer", ntpServer);
     prefs.putInt("tzOffsetMin", tzOffsetMin);
@@ -1814,6 +1877,8 @@ void handleAPI_Timers() {
     prefs.putUShort("voltAlarmDv", voltAlarmDeciV);
     prefs.putUShort("voltClearDv", voltClearDeciV);
     prefs.putUShort("voltDebSec", voltDebounceS);
+    prefs.putUShort("reportFirst", reportFirstMin);
+    prefs.putUShort("reportRpt", reportRptMin);
 
     setupTime();   // pick up a changed server or offset immediately
     server.send(200, "text/plain", "Timers saved!");
@@ -1854,6 +1919,8 @@ void handleAPI_TimerStatus() {
     json += "\"voltAlarm\":" + String(voltAlarmDeciV) + ",";
     json += "\"voltClear\":" + String(voltClearDeciV) + ",";
     json += "\"voltDeb\":" + String(voltDebounceS) + ",";
+    json += "\"reportFirst\":" + String(reportFirstMin) + ",";
+    json += "\"reportRpt\":" + String(reportRptMin) + ",";
     json += "\"startArmed\":" + String(startArmed ? "true" : "false") + ",";
     json += "\"startAt\":\"" + (startArmed ? clockOfPublic(startTarget) : String("")) + "\"";
     json += "}";
@@ -2080,6 +2147,8 @@ void setup() {
     voltAlarmDeciV      = prefs.getUShort("voltAlarmDv", VOLT_ALARM_DECIV_DEFAULT);
     voltClearDeciV      = prefs.getUShort("voltClearDv", VOLT_CLEAR_DECIV_DEFAULT);
     voltDebounceS       = prefs.getUShort("voltDebSec", VOLT_DEBOUNCE_SEC_DEFAULT);
+    reportFirstMin      = prefs.getUShort("reportFirst", 30);
+    reportRptMin        = prefs.getUShort("reportRpt", 0);
     // Telegram
     tgEnabled = prefs.getBool("tgEnabled", false);
     tgToken   = prefs.getString("tgToken", "");
@@ -2234,6 +2303,7 @@ void loop() {
         lastSlowTick = millis();
         updateTelegramPollRate();
         updateFuel();
+        updateProgressReport();
         updateIgnition();
         updateScheduledStart();
         updateNotifications();

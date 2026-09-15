@@ -619,6 +619,20 @@
                     runtime limit applies.
                 </div>
 
+                <h2 style="font-size:1rem; margin-top:16px;">Progress reports</h2>
+                <div class="form-row">
+                    <input type="number" id="tmRepFirst" min="0" max="600"
+                           placeholder="First report after N min (0 = never)">
+                    <input type="number" id="tmRepRpt" min="0" max="600"
+                           placeholder="Repeat every N min (0 = once)">
+                </div>
+                <div class="info">
+                    &laquo;Heater: RUNNING&raquo; only says the state changed. These
+                    reports say whether the garage is actually warming up — and if
+                    it is not, the same message becomes a warning. Tune the delay:
+                    too early and a cold heat exchanger triggers false alarms.
+                </div>
+
                 <h2 style="font-size:1rem; margin-top:16px;">Supply voltage</h2>
                 <div class="form-row">
                     <input type="number" id="tmVoltAlarm" min="80" max="160"
@@ -882,6 +896,8 @@
                 document.getElementById('tmVoltAlarm').value   = d.voltAlarm;
                 document.getElementById('tmVoltClear').value   = d.voltClear;
                 document.getElementById('tmVoltDeb').value     = d.voltDeb;
+                document.getElementById('tmRepFirst').value    = d.reportFirst;
+                document.getElementById('tmRepRpt').value      = d.reportRpt;
                 document.getElementById('schedState').textContent = d.startArmed
                     ? 'Start scheduled for ' + d.startAt
                     : 'No start scheduled.';
@@ -919,6 +935,8 @@
             voltAlarm:  document.getElementById('tmVoltAlarm').value,
             voltClear:  document.getElementById('tmVoltClear').value,
             voltDeb:    document.getElementById('tmVoltDeb').value,
+            reportFirst: document.getElementById('tmRepFirst').value,
+            reportRpt:  document.getElementById('tmRepRpt').value,
             ntpServer:  document.getElementById('tmNtp').value,
             tzOffset:   document.getElementById('tmTz').value
         });
