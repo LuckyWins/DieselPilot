@@ -385,6 +385,7 @@
             ⚠️ No reply from the device — readings below are stale
             (<span id="staleAge">?</span>).
         </div>
+        <div class="info" id="heaterAge" style="display:none;"></div>
         <div class="status-grid">
             <div class="status-item">
                 <div class="status-label">State</div>
@@ -1021,6 +1022,21 @@
         document.querySelector('.status-grid').style.opacity = '1';
     }
 
+    // The device answering is not the same as the heater being heard. With a
+    // dead RF module the tiles keep their last values indefinitely and look
+    // perfectly live, so say out loud how old they are.
+    function showHeaterAge(ageSec) {
+        const box = document.getElementById('heaterAge');
+        if(ageSec === undefined || ageSec < 0) {
+            box.style.display = 'block';
+            box.textContent   = 'No reply from the heater yet.';
+            return;
+        }
+        const stale = ageSec > 30;
+        box.style.display = stale ? 'block' : 'none';
+        box.textContent   = `⚠️ Heater last heard ${ageSec} s ago — readings may be stale.`;
+    }
+
     function updateStatus() {
         fetch('/api/status')
             .then(r => r.json())
@@ -1035,6 +1051,7 @@
                 document.getElementById('rssi').textContent     = data.rssi;
                 document.getElementById('error').textContent    = data.errorName;
                 document.getElementById('currentAddr').textContent = data.addr;
+                showHeaterAge(data.ageSec);
                 markFresh();
             })
             .catch(markStale);

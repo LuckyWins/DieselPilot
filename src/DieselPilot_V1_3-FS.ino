@@ -874,6 +874,9 @@ static String tgStatusText() {
     m += "Signal:   " + String(heaterStatus.rssi) + " dBm\n";
     m += "Error:    " + String(getErrorName(heaterStatus.errorCode)) + "\n";
     m += "Mode:     " + String(heaterStatus.autoMode ? "AUTO" : "MANUAL") + "\n";
+    uint32_t age = (millis() - heaterStatus.lastUpdate) / 1000;
+    m += "\nUpdated:  " + String(age) + " s ago";
+    if(age > 30) m += "  (stale)";
     m += "\nClock:    " + String(timeValid ? currentTimeString() : String("not synced"));
     return m;
 }
@@ -1265,7 +1268,13 @@ void handleAPI_Status() {
     json += "\"addr\":\"" + (heaterPaired ? String(heaterAddress, HEX) : "Not paired") + "\",";
     json += "\"version\":\"" + jsonEscape(heaterVersion) + "\",";
     json += "\"errorCode\":" + String(heaterStatus.errorCode) + ",";
-    json += "\"errorName\":\"" + String(getErrorName(heaterStatus.errorCode)) + "\"";
+    json += "\"errorName\":\"" + String(getErrorName(heaterStatus.errorCode)) + "\",";
+    // The device answering says nothing about the heater still being heard:
+    // with a dead CC1101 these readings can be hours old and look live.
+    // Cast before the ternary: the other branch is unsigned, and -1 would be
+    // converted to 4294967295 instead of staying the "never heard" marker.
+    json += "\"ageSec\":" + String(heaterStatus.lastUpdate
+                ? (long)((millis() - heaterStatus.lastUpdate) / 1000) : -1L);
     json += "}";
     server.send(200, "application/json", json);
 }
