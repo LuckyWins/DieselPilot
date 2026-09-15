@@ -37,6 +37,9 @@
 #include <LittleFS.h>
 #include <ArduinoOTA.h>          // OTA firmware updates (espota protocol)
 
+#include "protocol.h"           // Состояния, коды ошибок, CRC, расчёт частоты
+#include "settings.h"           // Разбор форм настроек
+
 // ═══════════════════════════════════════════════════════════════════════════
 // HARDWARE CONFIG
 // ═══════════════════════════════════════════════════════════════════════════
@@ -62,32 +65,6 @@
 #define CMD_UP     0x3C
 #define CMD_DOWN   0x3E
 
-// Heater States
-#define STATE_OFF            0
-#define STATE_STARTUP        1
-#define STATE_WARMING        2
-#define STATE_WARMING_WAIT   3
-#define STATE_PRE_RUN        4
-#define STATE_RUNNING        5
-#define STATE_SHUTDOWN       6
-#define STATE_SHUTTING_DOWN  7
-#define STATE_COOLING        8
-
-// Error Codes (BYTE[7])
-#define ERR_NONE           0x00
-#define ERR_ON             0x01
-#define ERR_UNDERVOLTAGE   0x02
-#define ERR_OVERVOLTAGE    0x03
-#define ERR_SPARK_PLUG     0x04
-#define ERR_OIL_PUMP       0x05
-#define ERR_OVERHEAT       0x06
-#define ERR_MOTOR          0x07
-#define ERR_DISCONNECT     0x08
-#define ERR_EXTINGUISHED   0x09
-#define ERR_SENSOR         0x0A
-#define ERR_IGNITION       0x0B
-#define ERR_STANDBY        0x0C
-
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBAL OBJECTS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -106,7 +83,9 @@ const unsigned long menuIntervalV1 = 3500;
 const unsigned long commandLockTimeV1 = 5000;
 unsigned long lastCommandTimeV1 = 0;
 byte myAddrV1[3] = {0x19, 0x52, 0x4B};
-U8G2_SH1106_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+// SSD1315 программно совместим с SSD1306. У SH1106 буфер 132 px
+// с офсетом 2, поэтому его драйвер давал бы сдвиг картинки.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBAL VARIABLES
@@ -180,27 +159,8 @@ String otaPassword = "";                // Password required to flash (saved in 
 bool   otaRunning  = false;             // ArduinoOTA.begin() has been called
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ERROR CODE DECODER
+// ИСТОРИЯ ОШИБОК
 // ═══════════════════════════════════════════════════════════════════════════
-
-const char* getErrorName(uint8_t code) {
-    switch(code) {
-        case ERR_NONE:         return "NORMAL";
-        case ERR_ON:           return "NORMAL";
-        case ERR_UNDERVOLTAGE: return "UNDERVOLTAGE";
-        case ERR_OVERVOLTAGE:  return "OVERVOLTAGE";
-        case ERR_SPARK_PLUG:   return "SPARK PLUG";
-        case ERR_OIL_PUMP:     return "OIL PUMP";
-        case ERR_OVERHEAT:     return "OVERHEAT";
-        case ERR_MOTOR:        return "MOTOR";
-        case ERR_DISCONNECT:   return "DISCONNECT";
-        case ERR_EXTINGUISHED: return "EXTINGUISHED";
-        case ERR_SENSOR:       return "SENSOR";
-        case ERR_IGNITION:     return "IGNITION";
-        case ERR_STANDBY:      return "STANDBY";
-        default:               return "UNKNOWN";
-    }
-}
 
 void addErrorToHistory(uint8_t errorCode) {
     if(errorCode == ERR_NONE) return;
@@ -244,22 +204,6 @@ uint8_t cc1101_readReg(uint8_t addr) {
     uint8_t val = SPI.transfer(0xFF);
     digitalWrite(PIN_SS, HIGH);
     return val;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CRC-16/MODBUS
-// ═══════════════════════════════════════════════════════════════════════════
-
-uint16_t crc16_modbus(uint8_t* buf, int len) {
-    uint16_t crc = 0xFFFF;
-    for(int pos = 0; pos < len; pos++) {
-        crc ^= (uint8_t)buf[pos];
-        for(int i = 8; i != 0; i--) {
-            if((crc & 0x0001) != 0) { crc >>= 1; crc ^= 0xA001; }
-            else { crc >>= 1; }
-        }
-    }
-    return crc;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -309,11 +253,13 @@ void cc1101_init_V1() {
 }
 
 void cc1101_setFrequency(uint32_t freqHz) {
-    uint32_t freq = ((uint64_t)freqHz * 65536) / 26000000;
+    uint32_t freq = freqToRegisters(freqHz);
     cc1101_writeReg(0x0D, (freq >> 16) & 0xFF);
     cc1101_writeReg(0x0E, (freq >> 8) & 0xFF);
     cc1101_writeReg(0x0F, freq & 0xFF);
-    Serial.printf("✅ CC1101 custom frequency set: %lu Hz\n", freqHz);
+    // Показываем частоту после округления до шага перестройки (~397 Гц),
+    // а не запрошенную — модуль настроился именно на неё.
+    Serial.printf("✅ CC1101 custom frequency set: %u Hz\n", registersToFreq(freq));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -510,21 +456,6 @@ uint32_t findHeater(uint16_t timeout) {
     return 0;
 }
 
-const char* getStateName(uint8_t state) {
-    switch(state) {
-        case STATE_OFF:         return "OFF";
-        case STATE_STARTUP:     return "STARTUP";
-        case STATE_WARMING:     return "WARMING";
-        case STATE_WARMING_WAIT:return "WARM WAIT";
-        case STATE_PRE_RUN:     return "PRE-RUN";
-        case STATE_RUNNING:     return "RUNNING";
-        case STATE_SHUTDOWN:    return "SHUTDOWN";
-        case STATE_SHUTTING_DOWN:return "SHUTTING";
-        case STATE_COOLING:     return "COOLING";
-        default:                return "UNKNOWN";
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // OTA FUNCTIONS  (ArduinoOTA / espota — local network firmware updates)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -653,6 +584,25 @@ void handleRoot() {
     file.close();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// РАЗБОР ФОРМ НАСТРОЕК
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Обёртки над server.arg(). Вся логика — в settings.cpp, чтобы покрывалась
+// тестами: именно здесь жил баг, стиравший учётные данные Wi-Fi.
+
+static String formField(const char* name, const String& current) {
+    return resolveField(server.hasArg(name), server.arg(name), current);
+}
+
+static bool formFlag(const char* name, bool current) {
+    return resolveFlag(server.hasArg(name), server.arg(name), current);
+}
+
+static long formNumber(const char* name, long current, long minValue, long maxValue) {
+    return resolveNumber(server.hasArg(name), server.arg(name), current, minValue, maxValue);
+}
+
 void handleAPI_Status() {
     String json = "{";
     json += "\"state\":\"" + String(getStateName(heaterStatus.state)) + "\",";
@@ -685,10 +635,8 @@ void handleAPI_OTAStatus() {
 
 void handleAPI_OTAConfig() {
     // Toggle OTA ON/OFF and (optionally) set the flashing password.
-    otaEnabled = (server.arg("enabled") == "1");
-
-    // Password is authoritative when supplied; empty value clears it (no auth).
-    if(server.hasArg("password")) otaPassword = server.arg("password");
+    otaEnabled  = formFlag("enabled", otaEnabled);
+    otaPassword = formField("password", otaPassword);
 
     prefs.putBool("otaEnabled", otaEnabled);
     prefs.putString("otaPass", otaPassword);
@@ -772,9 +720,10 @@ void handleAPI_PairManual() {
 }
 
 void handleAPI_WiFi() {
-    deviceName = server.arg("deviceName");
+    deviceName  = formField("deviceName", deviceName);
     if(deviceName.length() == 0) deviceName = "DieselPilot";
-    staSSID = server.arg("ssid"); staPassword = server.arg("pass");
+    staSSID     = formField("ssid", staSSID);
+    staPassword = formField("pass", staPassword);
     prefs.putString("deviceName", deviceName);
     prefs.putString("staSSID", staSSID); prefs.putString("staPass", staPassword);
     server.send(200, "text/plain", "WiFi saved! Rebooting...");
@@ -782,12 +731,15 @@ void handleAPI_WiFi() {
 }
 
 void handleAPI_MQTT() {
-    mqttServer = server.arg("server");
-    mqttPort = server.arg("port").toInt();
-    mqttTopic = server.arg("topic");
-    mqttAuthEnabled = (server.arg("authEnabled") == "1");
-    mqttUser = server.arg("user"); mqttPassword = server.arg("pass");
-    mqttEnabled = (mqttServer.length() > 0);
+    mqttServer      = formField("server", mqttServer);
+    mqttPort        = formNumber("port", mqttPort, 1, 65535);
+    mqttTopic       = formField("topic", mqttTopic);
+    mqttAuthEnabled = formFlag("authEnabled", mqttAuthEnabled);
+    mqttUser        = formField("user", mqttUser);
+    mqttPassword    = formField("pass", mqttPassword);
+    // MQTT включён, пока задан адрес брокера. Выключается очисткой
+    // этого поля маркером __CLEAR__ — другого пути нет.
+    mqttEnabled     = (mqttServer.length() > 0);
     prefs.putString("mqttServer", mqttServer); prefs.putInt("mqttPort", mqttPort);
     prefs.putString("mqttTopic", mqttTopic); prefs.putBool("mqttAuthEn", mqttAuthEnabled);
     prefs.putString("mqttUser", mqttUser); prefs.putString("mqttPass", mqttPassword);

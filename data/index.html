@@ -467,10 +467,11 @@
         <div id="wifi" class="tab-content">
             <div class="glass-card">
                 <h2>📡 WiFi Configuration</h2>
-                <input type="text" id="deviceName" placeholder="Hostname (e.g. DieselPilot)">
-                <input type="text" id="wifiSSID" placeholder="WiFi SSID">
-                <input type="password" id="wifiPass" placeholder="WiFi Password">
+                <input type="text" id="deviceName" placeholder="Hostname (empty = keep current)">
+                <input type="text" id="wifiSSID" placeholder="WiFi SSID (empty = keep current)">
+                <input type="password" id="wifiPass" placeholder="WiFi Password (empty = keep current)">
                 <button onclick="saveWiFi()">💾 SAVE &amp; REBOOT</button>
+                <div class="info">Blank fields keep their saved value. Type <strong>__CLEAR__</strong> to erase one.</div>
             </div>
         </div>
 
@@ -478,10 +479,10 @@
         <div id="mqtt" class="tab-content">
             <div class="glass-card">
                 <h2>📨 MQTT Configuration</h2>
-                <input type="text" id="mqttServer" placeholder="MQTT Broker IP">
+                <input type="text" id="mqttServer" placeholder="MQTT Broker IP (empty = keep current)">
                 <div class="form-row">
                     <input type="number" id="mqttPort" placeholder="Port" value="1883">
-                    <input type="text" id="mqttTopic" placeholder="Topic">
+                    <input type="text" id="mqttTopic" placeholder="Topic (empty = keep current)">
                 </div>
                 <div class="toggle-row">
                     <span>Authentication</span>
@@ -491,10 +492,11 @@
                     </label>
                 </div>
                 <div id="mqttAuthFields" style="display:none;">
-                    <input type="text" id="mqttUser" placeholder="Username">
-                    <input type="password" id="mqttPass" placeholder="Password">
+                    <input type="text" id="mqttUser" placeholder="Username (empty = keep current)">
+                    <input type="password" id="mqttPass" placeholder="Password (empty = keep current)">
                 </div>
                 <button onclick="saveMQTT()">💾 SAVE MQTT</button>
+                <div class="info">Blank fields keep their saved value. Clear the broker address with <strong>__CLEAR__</strong> to disable MQTT.</div>
             </div>
         </div>
 
@@ -512,7 +514,7 @@
                     </label>
                 </div>
 
-                <input type="password" id="otaPass" placeholder="OTA Password (leave blank = no password)" autocomplete="new-password">
+                <input type="password" id="otaPass" placeholder="OTA Password (empty = keep current)" autocomplete="new-password">
                 <button onclick="saveOTA()">💾 SAVE &amp; REBOOT</button>
 
                 <!-- Shown when OTA is ON -->
@@ -539,7 +541,8 @@
                 <div id="otaOffSection">
                     <div class="info">
                         Enable OTA to flash new firmware over WiFi (no USB cable needed).
-                        Set a password to protect uploads.
+                        Set a password to protect uploads. A blank password field keeps
+                        the saved one — type <strong>__CLEAR__</strong> to remove it.
                     </div>
                 </div>
 
