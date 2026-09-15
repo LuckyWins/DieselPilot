@@ -381,6 +381,10 @@
     <!-- STATUS -->
     <div class="glass-card">
         <h2>📊 Status</h2>
+        <div class="info" id="staleBanner" style="display:none;">
+            ⚠️ No reply from the device — readings below are stale
+            (<span id="staleAge">?</span>).
+        </div>
         <div class="status-grid">
             <div class="status-item">
                 <div class="status-label">State</div>
@@ -409,6 +413,10 @@
             <div class="status-item">
                 <div class="status-label">Mode</div>
                 <div class="status-value" id="mode">--</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Signal</div>
+                <div class="status-value"><span id="rssi">--</span>dBm</div>
             </div>
             <div class="status-item">
                 <div class="status-label">Error</div>
@@ -455,13 +463,18 @@
                 <h2>🔗 Pairing</h2>
                 <select id="version">
                     <option value="V2">Protocol V2 (433.937 MHz)</option>
-                    <option value="V1">Protocol V1 (433.892 MHz)</option>
+                    <option value="V1">Protocol V1 (433.920 MHz)</option>
                 </select>
                 <input type="number" id="customFreq" placeholder="Custom Frequency (Hz) — optional">
                 <button onclick="autoPair()">🔍 AUTO PAIR</button>
                 <input type="text" id="manualAddr" placeholder="Manual Address (0xCA00445B)" style="margin-top:12px;">
                 <button onclick="manualPair()">✏️ MANUAL PAIR</button>
+                <div class="info" id="pairProgress" style="display:none;">
+                    🔍 Listening… <span id="pairLeft">60</span> s left.
+                    Press and hold the pairing button on the heater.
+                </div>
                 <div class="info"><strong>Current:</strong> <span id="currentAddr">Not paired</span></div>
+                <button class="danger" onclick="unpair()">🔓 FORGET HEATER</button>
             </div>
         </div>
 
@@ -682,6 +695,9 @@
                         <div class="status-value" style="font-size:1rem;" id="uptime">--</div>
                     </div>
                 </div>
+                <h2 style="font-size:1rem; margin-top:16px;">Recent errors</h2>
+                <div class="info" id="errorHistory">none recorded</div>
+
                 <div class="form-row" style="margin-top:12px;">
                     <button onclick="rebootDevice()">🔄 REBOOT</button>
                     <button class="danger" onclick="factoryReset()">⚠️ FACTORY RESET</button>
@@ -709,12 +725,59 @@
         const btn     = document.getElementById('settingsBtn');
         overlay.classList.toggle('active');
         btn.classList.toggle('active');
-        if(overlay.classList.contains('active')) updateOtaUI();
+        if(overlay.classList.contains('active')) { updateOtaUI(); loadConfig(); }
     }
 
     document.getElementById('settingsOverlay').addEventListener('click', function(e) {
         if(e.target === this) toggleSettings();
     });
+
+    // ── FORM PRE-FILL ─────────────────────────────────────────────
+    // Blank fields keep their stored value, so the page shows what is
+    // currently configured and only sends what the user actually changed.
+    function loadConfig() {
+        fetch('/api/config')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('deviceName').value = d.deviceName;
+                document.getElementById('wifiSSID').value   = d.staSSID;
+                document.getElementById('wifiPass').placeholder = d.staPassSet
+                    ? 'Password is set (empty = keep current)'
+                    : 'WiFi Password';
+
+                document.getElementById('mqttServer').value = d.mqttServer;
+                document.getElementById('mqttPort').value   = d.mqttPort;
+                document.getElementById('mqttTopic').value  = d.mqttTopic;
+                document.getElementById('mqttAuth').checked = d.mqttAuth;
+                document.getElementById('mqttUser').value   = d.mqttUser;
+                document.getElementById('mqttPass').placeholder = d.mqttPassSet
+                    ? 'Password is set (empty = keep current)'
+                    : 'Password';
+                toggleMQTT();
+
+                document.getElementById('version').value = d.heaterVersion;
+                if(d.customFreq > 0)
+                    document.getElementById('customFreq').value = d.customFreq;
+            })
+            .catch(() => {});
+    }
+
+    function loadErrors() {
+        fetch('/api/errors')
+            .then(r => r.json())
+            .then(list => {
+                const box = document.getElementById('errorHistory');
+                if(!list.length) { box.textContent = 'none recorded'; return; }
+                box.innerHTML = list.map(e => {
+                    const m = Math.floor(e.agoSec / 60);
+                    const ago = m > 59 ? Math.floor(m / 60) + ' h ago'
+                              : m > 0  ? m + ' min ago'
+                                       : e.agoSec + ' s ago';
+                    return `<div>${e.name} — ${ago}</div>`;
+                }).join('');
+            })
+            .catch(() => {});
+    }
 
     // ── TELEGRAM ──────────────────────────────────────────────────
     function updateTelegramUI() {
@@ -805,6 +868,7 @@
         document.getElementById(tab).classList.add('active');
         if(tab === 'ota')      updateOtaUI();
         if(tab === 'telegram') updateTelegramUI();
+        if(tab === 'system')   loadErrors();
         if(tab === 'timers') updateTimersUI();
     }
 
@@ -824,7 +888,8 @@
         const version = document.getElementById('version').value;
         const freq    = document.getElementById('customFreq').value;
         post(`/api/pair/auto?version=${version}&customFreq=${freq}`)
-            .then(msg => alert(msg));
+            .then(msg => { alert(msg); pollPairing(); })
+            .catch(() => alert('Device unreachable'));
     }
 
     function manualPair() {
@@ -832,7 +897,38 @@
         const version = document.getElementById('version').value;
         const freq    = document.getElementById('customFreq').value;
         post(`/api/pair/manual?addr=${addr}&version=${version}&customFreq=${freq}`)
-            .then(msg => alert(msg));
+            .then(msg => { alert(msg); updateStatus(); })
+            .catch(() => alert('Device unreachable'));
+    }
+
+    // The search now runs on the device, so the page follows its progress
+    // rather than hanging on a request for a minute.
+    function pollPairing() {
+        const box  = document.getElementById('pairProgress');
+        const left = document.getElementById('pairLeft');
+
+        const tick = () => fetch('/api/pair/status')
+            .then(r => r.json())
+            .then(d => {
+                if(d.state === 'searching') {
+                    box.style.display = 'block';
+                    left.textContent  = d.secondsLeft;
+                    setTimeout(tick, 1000);
+                    return;
+                }
+                box.style.display = 'none';
+                if(d.state === 'paired') alert('Paired: 0x' + d.addr);
+                if(d.state === 'failed') alert('Pairing failed — no reply from the heater');
+                updateStatus();
+            })
+            .catch(() => { box.style.display = 'none'; });
+
+        tick();
+    }
+
+    function unpair() {
+        if(!confirm('Forget the paired heater? WiFi and MQTT are kept.')) return;
+        post('/api/unpair').then(msg => { alert(msg); updateStatus(); });
     }
 
     // ── WIFI / MQTT / OTA ─────────────────────────────────────────
@@ -907,6 +1003,24 @@
     }
 
     // ── MAIN STATUS POLL ──────────────────────────────────────────
+    let lastOk = 0;
+
+    // Without this the tiles simply freeze on their last values when the
+    // device stops answering, which looks exactly like live data.
+    function markStale() {
+        const age = lastOk ? Math.round((Date.now() - lastOk) / 1000) : 0;
+        document.getElementById('staleAge').textContent =
+            lastOk ? age + ' s ago' : 'never connected';
+        document.getElementById('staleBanner').style.display = 'block';
+        document.querySelector('.status-grid').style.opacity = '0.45';
+    }
+
+    function markFresh() {
+        lastOk = Date.now();
+        document.getElementById('staleBanner').style.display = 'none';
+        document.querySelector('.status-grid').style.opacity = '1';
+    }
+
     function updateStatus() {
         fetch('/api/status')
             .then(r => r.json())
@@ -918,9 +1032,12 @@
                 document.getElementById('setpoint').textContent = data.setpoint;
                 document.getElementById('pump').textContent     = data.pump;
                 document.getElementById('mode').textContent     = data.mode;
+                document.getElementById('rssi').textContent     = data.rssi;
                 document.getElementById('error').textContent    = data.errorName;
                 document.getElementById('currentAddr').textContent = data.addr;
-            });
+                markFresh();
+            })
+            .catch(markStale);
 
         fetch('/api/info')
             .then(r => r.json())
@@ -928,18 +1045,35 @@
                 document.getElementById('ipAddr').textContent        = data.ip;
                 document.getElementById('wifiMode').textContent      = data.wifiMode;
                 document.getElementById('mqttStatus').textContent    = data.mqtt;
-                document.getElementById('otaInfoStatus').textContent  = data.ota;
+                document.getElementById('otaInfoStatus').textContent = data.ota;
                 document.getElementById('uptime').textContent        = data.uptime;
                 document.getElementById('sysTime').textContent       = data.time;
                 document.getElementById('fwVersion').textContent     = data.version;
                 // Keep the header pill live, but DON'T touch the OTA toggle here.
                 setOtaPill(data.ota === 'Enabled');
-            });
+            })
+            .catch(() => {});
     }
 
-    // Initial load + polling
-    updateStatus();
-    setInterval(updateStatus, 3000);
+    // A forgotten tab used to poll every 3 seconds forever. Over a metered
+    // mobile link that adds up to tens of megabytes a day.
+    let pollTimer = null;
+
+    function startPolling() {
+        if(pollTimer) return;
+        updateStatus();
+        pollTimer = setInterval(updateStatus, 3000);
+    }
+
+    function stopPolling() {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+
+    document.addEventListener('visibilitychange',
+        () => document.hidden ? stopPolling() : startPolling());
+
+    startPolling();
 </script>
 </body>
 </html>
