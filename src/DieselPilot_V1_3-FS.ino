@@ -613,23 +613,16 @@ void updateHeaterStatus() {
     }
 }
 
-uint32_t findHeater(uint16_t timeout) {
-    Serial.println("Searching for heater...");
-    displayLine2 = "Pairing..."; updateDisplay();
-    uint8_t buf[32];
-    uint8_t rxLen = 0;
-    if(receivePacket(buf, timeout, &rxLen)) {
-        return ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
-               ((uint32_t)buf[4] << 8) | buf[5];
-    }
-    return 0;
-}
 
 // Listens in short slices so the rest of the loop keeps running. The window
 // and the "first valid frame wins" rule are unchanged from the blocking
 // version; only the waiting is broken up.
 void updatePairing() {
     if(pairState != PAIR_SEARCHING) return;
+
+    // A dead module would burn a whole slice per iteration waiting for a
+    // frame that cannot arrive.
+    if(cc1101Fault) return;
 
     if((int32_t)(pairDeadlineMs - millis()) <= 0) {
         pairState = PAIR_FAILED;
@@ -1677,6 +1670,11 @@ void setup() {
         }
     }
 
+    // Without a seed, Arduino's random() returns the same sequence after every
+    // boot -- which made V1 auto-pairing hand out one fixed address, identical
+    // on every device and unchanged by re-pairing. The ESP32 has a hardware RNG.
+    randomSeed(esp_random());
+
     // SPI + CC1101
     pinMode(PIN_SCK, OUTPUT); pinMode(PIN_MOSI, OUTPUT);
     pinMode(PIN_MISO, INPUT); pinMode(PIN_SS, OUTPUT); pinMode(PIN_GDO2, INPUT);
@@ -1816,6 +1814,11 @@ void loop() {
             Serial.println("⚠️ CC1101 not responding, re-init...");
             cc1101_applyConfig();
         }
+    } else if(pairState == PAIR_SEARCHING) {
+        // The search and the status poll would otherwise flush each other's
+        // RX FIFO: both drive the same radio, and the poll runs every three
+        // seconds. The blocking version could not collide because it held
+        // the whole loop.
     } else if(millis() - lastHeaterUpdate > 3000 && heaterPaired) {
         lastHeaterUpdate = millis();
         if(heaterVersion == "V1") updateHeaterStatus_V1();
