@@ -72,6 +72,11 @@
 // Retry period for re-initialising the CC1101 after a fault
 #define CC1101_RETRY_MS 30000
 
+// Wi-Fi reconnect backoff bounds. The garage sits on the edge of town and
+// the link can be down for hours, so retries back off instead of hammering.
+#define WIFI_RETRY_MIN_MS 5000
+#define WIFI_RETRY_MAX_MS 300000
+
 // Commands
 #define CMD_WAKEUP 0x23
 #define CMD_MODE   0x24
@@ -536,6 +541,51 @@ uint32_t findHeater(uint16_t timeout) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WIFI SUPERVISION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Keeps the station connection alive.
+//
+// Previously the link was only established in setup(), and loop() never
+// looked at WiFi.status() again. Recovery relied entirely on the driver's
+// built-in retry, which has no backoff and no reporting. Since Telegram is
+// the only remote control channel, a link that fails to come back means the
+// device is unreachable until someone drives out to the garage.
+void superviseWiFi() {
+    if(useAP || staSSID.length() == 0) return;   // nothing to reconnect to
+
+    static unsigned long lastAttempt = 0;
+    static unsigned long backoffMs   = WIFI_RETRY_MIN_MS;
+    static bool wasConnected = true;
+
+    if(WiFi.status() == WL_CONNECTED) {
+        if(!wasConnected) {
+            Serial.println("✅ WiFi reconnected: " + WiFi.localIP().toString());
+            wasConnected = true;
+        }
+        backoffMs = WIFI_RETRY_MIN_MS;
+        return;
+    }
+
+    if(wasConnected) {
+        Serial.println("⚠️ WiFi lost, will retry");
+        wasConnected = false;
+        lastAttempt  = millis();   // give the driver its own chance first
+        return;
+    }
+
+    if(millis() - lastAttempt < backoffMs) return;
+    lastAttempt = millis();
+
+    Serial.printf("WiFi reconnect attempt, next in %lu s\n", backoffMs / 1000);
+    WiFi.disconnect();
+    WiFi.begin(staSSID.c_str(), staPassword.c_str());
+
+    backoffMs *= 2;
+    if(backoffMs > WIFI_RETRY_MAX_MS) backoffMs = WIFI_RETRY_MAX_MS;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // OTA FUNCTIONS  (ArduinoOTA / espota — local network firmware updates)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -915,6 +965,8 @@ void setup() {
     cc1101_applyConfig();
 
     WiFi.setHostname(deviceName.c_str());
+    // Driver-level retry handles brief drops; superviseWiFi() covers the rest.
+    WiFi.setAutoReconnect(true);
 
     // WiFi connect
     if(staSSID.length() > 0) {
@@ -986,6 +1038,7 @@ void loop() {
 
     feedWatchdog();
     yield();
+    superviseWiFi();
     server.handleClient();
     // MQTT
     if(mqttEnabled && !mqtt.connected()) {
