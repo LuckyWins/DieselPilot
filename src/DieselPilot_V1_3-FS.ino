@@ -42,6 +42,7 @@
 #include "settings.h"           // Settings form parsing
 #include "scheduler.h"          // Shutdown timers
 #include "notify.h"             // Whitelist, repeat suppression, backoff
+#include "json.h"               // Response string escaping
 
 #include <WiFiClientSecure.h>
 #include <AsyncTelegram2.h>
@@ -1252,6 +1253,7 @@ static long formNumber(const char* name, long current, long minValue, long maxVa
 
 void handleAPI_Status() {
     String json = "{";
+    json.reserve(320);
     json += "\"state\":\"" + String(getStateName(heaterStatus.state)) + "\",";
     json += "\"voltage\":" + String(heaterStatus.voltage / 10.0, 1) + ",";
     json += "\"ambient\":" + String(heaterStatus.ambientTemp) + ",";
@@ -1261,7 +1263,7 @@ void handleAPI_Status() {
     json += "\"mode\":\"" + String(heaterStatus.autoMode ? "AUTO" : "MANUAL") + "\",";
     json += "\"rssi\":" + String(heaterStatus.rssi) + ",";
     json += "\"addr\":\"" + (heaterPaired ? String(heaterAddress, HEX) : "Not paired") + "\",";
-    json += "\"version\":\"" + heaterVersion + "\",";
+    json += "\"version\":\"" + jsonEscape(heaterVersion) + "\",";
     json += "\"errorCode\":" + String(heaterStatus.errorCode) + ",";
     json += "\"errorName\":\"" + String(getErrorName(heaterStatus.errorCode)) + "\"";
     json += "}";
@@ -1271,10 +1273,11 @@ void handleAPI_Status() {
 void handleAPI_OTAStatus() {
     // Returns OTA state for GUI
     String json = "{";
+    json.reserve(320);
     json += "\"enabled\":" + String(otaEnabled ? "true" : "false") + ",";
     json += "\"running\":" + String(otaRunning ? "true" : "false") + ",";
     json += "\"hasPassword\":" + String(otaPassword.length() > 0 ? "true" : "false") + ",";
-    json += "\"hostname\":\"" + deviceName + "\",";
+    json += "\"hostname\":\"" + jsonEscape(deviceName) + "\",";
     json += "\"ip\":\"" + (useAP ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + "\"";
     json += "}";
     server.send(200, "application/json", json);
@@ -1438,9 +1441,10 @@ void handleAPI_Timers() {
 
 void handleAPI_TimerStatus() {
     String json = "{";
+    json.reserve(320);
     json += "\"timeValid\":" + String(timeValid ? "true" : "false") + ",";
     json += "\"now\":\"" + currentTimeString() + "\",";
-    json += "\"ntpServer\":\"" + ntpServer + "\",";
+    json += "\"ntpServer\":\"" + jsonEscape(ntpServer) + "\",";
     json += "\"tzOffset\":" + String(tzOffsetMin) + ",";
     json += "\"autoOff\":" + String(autoOffMin) + ",";
     json += "\"blackoutEn\":" + String(blackoutEnabled ? "true" : "false") + ",";
@@ -1462,6 +1466,7 @@ void handleAPI_PairStatus() {
     if(left < 0) left = 0;
 
     String json = "{";
+    json.reserve(320);
     json += "\"state\":\"" + String(st) + "\",";
     json += "\"secondsLeft\":" + String(left) + ",";
     json += "\"addr\":\"" + (heaterPaired ? String(heaterAddress, HEX) : String("")) + "\"";
@@ -1473,16 +1478,17 @@ void handleAPI_PairStatus() {
 // only: a blank field means "keep", so the page never needs their values.
 void handleAPI_Config() {
     String json = "{";
-    json += "\"deviceName\":\"" + deviceName + "\",";
-    json += "\"staSSID\":\"" + staSSID + "\",";
+    json.reserve(320);
+    json += "\"deviceName\":\"" + jsonEscape(deviceName) + "\",";
+    json += "\"staSSID\":\"" + jsonEscape(staSSID) + "\",";
     json += "\"staPassSet\":" + String(staPassword.length() > 0 ? "true" : "false") + ",";
-    json += "\"mqttServer\":\"" + mqttServer + "\",";
+    json += "\"mqttServer\":\"" + jsonEscape(mqttServer) + "\",";
     json += "\"mqttPort\":" + String(mqttPort) + ",";
-    json += "\"mqttTopic\":\"" + mqttTopic + "\",";
+    json += "\"mqttTopic\":\"" + jsonEscape(mqttTopic) + "\",";
     json += "\"mqttAuth\":" + String(mqttAuthEnabled ? "true" : "false") + ",";
-    json += "\"mqttUser\":\"" + mqttUser + "\",";
+    json += "\"mqttUser\":\"" + jsonEscape(mqttUser) + "\",";
     json += "\"mqttPassSet\":" + String(mqttPassword.length() > 0 ? "true" : "false") + ",";
-    json += "\"heaterVersion\":\"" + heaterVersion + "\",";
+    json += "\"heaterVersion\":\"" + jsonEscape(heaterVersion) + "\",";
     json += "\"customFreq\":" + String(customFrequency);
     json += "}";
     server.send(200, "application/json", json);
@@ -1492,6 +1498,7 @@ void handleAPI_Config() {
 void handleAPI_Errors() {
     int count = errorHistoryIndex < 10 ? errorHistoryIndex : 10;
     String json = "[";
+    json.reserve(512);
     for(int i = 0; i < count; i++) {
         int idx = (errorHistoryIndex - 1 - i) % 10;
         if(i) json += ",";
@@ -1538,6 +1545,7 @@ void handleAPI_Telegram() {
 
 void handleAPI_TelegramStatus() {
     String json = "{";
+    json.reserve(320);
     json += "\"enabled\":" + String(tgEnabled ? "true" : "false") + ",";
     // The token grants remote control of the heater and is never returned.
     json += "\"tokenSet\":" + String(tgToken.length() > 0 ? "true" : "false") + ",";
@@ -1547,7 +1555,7 @@ void handleAPI_TelegramStatus() {
     json += "\"discovering\":" + String(
         (tgDiscoverUntilMs != 0 && (int32_t)(tgDiscoverUntilMs - millis()) > 0)
             ? "true" : "false") + ",";
-    json += "\"chats\":\"" + tgChats + "\"";
+    json += "\"chats\":\"" + jsonEscape(tgChats) + "\"";
     json += "}";
     server.send(200, "application/json", json);
 }
@@ -1572,7 +1580,8 @@ void handleAPI_TelegramTest() {
 
 void handleAPI_Info() {
     String json = "{";
-    json += "\"hostname\":\"" + deviceName + "\",";
+    json.reserve(320);
+    json += "\"hostname\":\"" + jsonEscape(deviceName) + "\",";
     json += "\"wifiMode\":\"" + String(useAP ? "AP" : "STA") + "\",";
     json += "\"ip\":\"" + (useAP ? WiFi.softAPIP().toString() : WiFi.localIP().toString()) + "\",";
     json += "\"mqtt\":\"" + String(mqttEnabled && mqtt.connected() ? "Connected" : "Disconnected") + "\",";
