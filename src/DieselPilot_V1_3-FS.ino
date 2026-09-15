@@ -84,6 +84,22 @@
 #define PAIR_WINDOW_MS 60000
 #define PAIR_SLICE_MS  400
 
+// Heater poll rates. 3 s is what the firmware always used; the idle rate
+// applies when the heater is off, which in a preheat-on-arrival installation
+// is most of the time. A failed poll costs up to 3 s of loop time -- sending
+// the wakeup plus a 2 s receive window -- so polling an unreachable heater
+// every 3 s saturates the cycle and makes everything else sluggish.
+#define HEATER_POLL_FAST_MS  3000
+#define HEATER_POLL_IDLE_MS  10000
+// After any command, poll fast for a while so the result appears without
+// waiting out the idle interval.
+#define HEATER_POLL_BOOST_MS 60000
+
+// Telegram polls fast while someone is pressing buttons and slowly otherwise.
+// A fixed rate has to choose between a sluggish keyboard and wasted data.
+#define TG_POLL_ACTIVE_MS  3000
+#define TG_POLL_BOOST_MS  60000
+
 // Accepted range for a hand-entered frequency, in hertz. The CC1101 covers
 // several bands; anything outside this is a typo, most often kilohertz.
 #define FREQ_MIN_HZ 300000000UL
@@ -186,19 +202,29 @@ AsyncTelegram2   tgBot(tgClient);
 bool   tgReady   = false;
 String tgPending = "";     // produced before the bot became reachable
 
-// Polling interval for incoming commands. Every poll costs traffic on a
-// metered plan, and a preheat two hours ahead does not need a fast reply.
-uint16_t tgPollSec = 20;
+// Idle polling interval for incoming commands. The bot drops to
+// TG_POLL_ACTIVE_MS for a minute after each message, so this rate only
+// governs the quiet hours -- which on a metered plan is where the data goes.
+uint16_t tgPollSec = 60;
 
 // Temporary window during which the bot answers /id to anyone, so the owner
 // can discover their own chat id without a third-party bot. Started from the
 // admin page, expires on its own.
 uint32_t tgDiscoverUntilMs = 0;
 
+// Interval currently handed to the library, so it is only reconfigured when
+// the rate actually changes.
+uint32_t tgCurrentPollMs = 0;
+
 // Heater
 uint32_t heaterAddress = 0x00000000;
 uint8_t packetSeq = 0;
 bool heaterPaired = false;
+
+// Last command sent to the heater, and last message handled by the bot.
+// Both open a window of faster polling.
+uint32_t lastHeaterCommandMs = 0;
+uint32_t lastTgActivityMs    = 0;
 
 // V2 pairing runs as a state machine in loop() rather than blocking the
 // request handler for a minute.
@@ -516,6 +542,7 @@ void txBurst(uint8_t len, uint8_t* bytes) {
 
 void sendCommand(uint8_t cmd) {
     if(!heaterPaired) return;
+    lastHeaterCommandMs = millis();
     if(heaterVersion == "V1") {
         lastCommandTimeV1 = millis();
         if(cmd == CMD_POWER) {
@@ -643,6 +670,15 @@ void updatePairing() {
     prefs.putUInt("heaterAddr", heaterAddress);
     pairState = PAIR_OK;
     Serial.printf("✅ Paired with 0x%08X\n", heaterAddress);
+}
+
+// Slow down only when there is nothing to watch. "Not OFF" covers the whole
+// purge sequence, which the scheduler follows closely, and a heater that has
+// gone silent stays on the idle rate rather than eating the loop.
+static uint32_t heaterPollIntervalMs() {
+    if(millis() - lastHeaterCommandMs < HEATER_POLL_BOOST_MS) return HEATER_POLL_FAST_MS;
+    if(heaterStatus.state != STATE_OFF)                       return HEATER_POLL_FAST_MS;
+    return HEATER_POLL_IDLE_MS;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -780,6 +816,7 @@ void updateTelegram() {
     tgClient.setCACert(tgCaCert.length() > 0 ? tgCaCert.c_str() : telegram_cert);
     tgBot.setTelegramToken(tgTokenBuf);
     tgBot.setUpdateTime((uint32_t)tgPollSec * 1000UL);
+    tgCurrentPollMs = (uint32_t)tgPollSec * 1000UL;
 
     tgReady = tgBot.begin();
     if(!tgReady) {
@@ -965,8 +1002,24 @@ void updateTelegramCommands() {
         return;
     }
 
+    lastTgActivityMs = millis();
     if(msg.messageType == MessageQuery) tgBot.endQuery(msg, "");
     tgHandleCommand(msg.chatId, text);
+}
+
+// Keeps the keyboard responsive while it is being used without paying for
+// that rate around the clock.
+void updateTelegramPollRate() {
+    if(!tgEnabled || !tgReady) return;
+
+    uint32_t want = (lastTgActivityMs != 0 &&
+                     millis() - lastTgActivityMs < TG_POLL_BOOST_MS)
+                  ? TG_POLL_ACTIVE_MS
+                  : (uint32_t)tgPollSec * 1000UL;
+
+    if(want == tgCurrentPollMs) return;
+    tgCurrentPollMs = want;
+    tgBot.setUpdateTime(want);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1678,7 +1731,7 @@ void setup() {
     tgToken   = prefs.getString("tgToken", "");
     tgChats   = prefs.getString("tgChats", "");
     tgCaCert  = prefs.getString("tgCaCert", "");
-    tgPollSec = prefs.getUShort("tgPollSec", 20);
+    tgPollSec = prefs.getUShort("tgPollSec", 60);
 
     if(heaterVersion == "V1") {
         if(prefs.getBytes("addrV1", myAddrV1, 3) != 3) {
@@ -1798,6 +1851,7 @@ void loop() {
     static unsigned long lastHeaterUpdate = 0;
     static unsigned long lastDisplayUpdate = 0;
     static unsigned long lastCC1101Retry = 0;
+    static unsigned long lastSlowTick = 0;
 
     feedWatchdog();
     yield();
@@ -1806,8 +1860,17 @@ void loop() {
     updatePairing();
     updateTelegram();
     updateTelegramCommands();
-    updateNotifications();
-    updateScheduler();
+
+    // The scheduler works at minute granularity and the notifier compares
+    // fields refreshed every few seconds. Running either on every iteration
+    // is pure waste: currentMinutesOfDay() alone recomputes the timezone
+    // thousands of times a second.
+    if(millis() - lastSlowTick >= 1000) {
+        lastSlowTick = millis();
+        updateTelegramPollRate();
+        updateNotifications();
+        updateScheduler();
+    }
     server.handleClient();
     // MQTT
     if(mqttEnabled && !mqtt.connected()) {
@@ -1835,7 +1898,7 @@ void loop() {
         // RX FIFO: both drive the same radio, and the poll runs every three
         // seconds. The blocking version could not collide because it held
         // the whole loop.
-    } else if(millis() - lastHeaterUpdate > 3000 && heaterPaired) {
+    } else if(millis() - lastHeaterUpdate > heaterPollIntervalMs() && heaterPaired) {
         lastHeaterUpdate = millis();
         if(heaterVersion == "V1") updateHeaterStatus_V1();
         else updateHeaterStatus();

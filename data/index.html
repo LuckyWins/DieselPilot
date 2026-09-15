@@ -545,10 +545,11 @@
                 </div>
 
                 <input type="number" id="tgPoll" min="5" max="300"
-                       placeholder="Poll interval, seconds (20 = default)">
+                       placeholder="Idle poll interval, seconds (60 = default)">
                 <div class="info">
-                    Each poll costs mobile data. 20 s is a good balance; raise it
-                    if the plan is tight, lower it for snappier buttons.
+                    The bot polls every 3 s for a minute after each message, so the
+                    keyboard stays responsive while you use it. This setting is the
+                    quiet-hours rate, which is where the mobile data actually goes.
                 </div>
 
                 <textarea id="tgCa" rows="3" placeholder="Custom root certificate (optional)"
