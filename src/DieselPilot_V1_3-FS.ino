@@ -41,6 +41,10 @@
 #include "protocol.h"           // States, error codes, CRC, frequency maths
 #include "settings.h"           // Settings form parsing
 #include "scheduler.h"          // Shutdown timers
+#include "notify.h"             // Whitelist, repeat suppression, backoff
+
+#include <WiFiClientSecure.h>
+#include <AsyncTelegram2.h>
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HARDWARE CONFIG
@@ -80,6 +84,11 @@
 
 // How often to check whether NTP has delivered a plausible date yet
 #define NTP_CHECK_MS 5000
+
+// Battery alarm thresholds, tenths of a volt. Diesel heaters draw enough to
+// flatten a battery, and "the car would not start" is worth a warning.
+#define TG_VOLT_ALARM_DECIV 115
+#define TG_VOLT_CLEAR_DECIV 120
 
 // Commands
 #define CMD_WAKEUP 0x23
@@ -148,6 +157,22 @@ bool     blackoutEnabled     = true;
 int      blackoutMinutes     = 22 * 60;
 uint16_t shutdownLeadMin     = 15;
 uint16_t cooldownExpectedMin = 5;
+
+// Telegram. The bot is the only remote channel, so the chat whitelist is the
+// single thing standing between a stranger and the heater.
+bool   tgEnabled = false;
+String tgToken   = "";
+String tgChats   = "";     // comma-separated chat ids
+String tgCaCert  = "";     // overrides the CA bundled with the library
+
+// AsyncTelegram2 and WiFiClientSecure both keep the pointers they are handed
+// rather than copying, so the token lives in a buffer that never moves.
+char tgTokenBuf[64] = {0};
+
+WiFiClientSecure tgClient;
+AsyncTelegram2   tgBot(tgClient);
+bool   tgReady   = false;
+String tgPending = "";     // produced before the bot became reachable
 
 // Heater
 uint32_t heaterAddress = 0x00000000;
@@ -630,6 +655,129 @@ void updateTimeSync() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TELEGRAM
+// ═══════════════════════════════════════════════════════════════════════════
+
+const char* resetReasonName(esp_reset_reason_t r) {
+    switch(r) {
+        case ESP_RST_POWERON:   return "power on";
+        case ESP_RST_EXT:       return "external reset";
+        case ESP_RST_SW:        return "software restart";
+        case ESP_RST_PANIC:     return "crash";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "watchdog";
+        case ESP_RST_BROWNOUT:  return "brownout";
+        case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+        default:                return "unknown";
+    }
+}
+
+static void tgSendToAll(const String& text) {
+    std::vector<int64_t> ids = parseChatList(std::string(tgChats.c_str()));
+    for(size_t i = 0; i < ids.size(); i++) {
+        if(!tgBot.sendTo(ids[i], text.c_str())) {
+            tgReady = false;   // force a reconnect on the next cycle
+        }
+    }
+}
+
+// Queues the message when the bot is not up yet. The boot notice is produced
+// before the network is ready, and it is the one worth keeping.
+void notifyTelegram(const String& text) {
+    Serial.println("TG: " + text);
+    if(!tgEnabled) return;
+
+    if(!tgReady) {
+        if(tgPending.length() < 512) {
+            if(tgPending.length()) tgPending += "\n\n";
+            tgPending += text;
+        }
+        return;
+    }
+    tgSendToAll(text);
+}
+
+// Connects lazily from loop() rather than in setup(): a TLS handshake with no
+// route out would stall startup, and the link here is unreliable by default.
+void updateTelegram() {
+    if(!tgEnabled || tgToken.length() == 0) return;
+    if(WiFi.status() != WL_CONNECTED || tgReady) return;
+
+    static uint32_t lastTry = 0;
+    static uint32_t backoff = 0;
+    if(lastTry != 0 && millis() - lastTry < backoff) return;
+    lastTry = millis();
+
+    strncpy(tgTokenBuf, tgToken.c_str(), sizeof(tgTokenBuf) - 1);
+
+    // A custom CA overrides the one bundled with the library. That is the
+    // escape hatch if Telegram ever changes issuer: with a hardcoded
+    // certificate only, a stale one would need a trip to the garage.
+    tgClient.setCACert(tgCaCert.length() > 0 ? tgCaCert.c_str() : telegram_cert);
+    tgBot.setTelegramToken(tgTokenBuf);
+
+    tgReady = tgBot.begin();
+    if(!tgReady) {
+        backoff = nextBackoffMs(backoff);
+        Serial.printf("⚠️ Telegram unreachable, retry in %u s\n", backoff / 1000);
+        return;
+    }
+
+    backoff = 0;
+    Serial.println("✅ Telegram connected");
+    if(tgPending.length()) {
+        tgSendToAll(tgPending);
+        tgPending = "";
+    }
+}
+
+// Watches for conditions worth a message. Everything goes through
+// changedSince(), because the heater is polled every three seconds and an
+// error would otherwise produce twenty messages a minute.
+void updateNotifications() {
+    if(!tgEnabled) return;
+
+    static int  lastError  = -1;
+    static int  lastState  = -1;
+    static int  lastFault  = -1;
+    static bool lowVoltage = false;
+    static bool statePrimed = false;
+
+    if(changedSince(lastFault, cc1101Fault ? 1 : 0) && cc1101Fault) {
+        notifyTelegram("🔴 CC1101 not responding — check the wiring");
+    }
+
+    if(heaterStatus.lastUpdate == 0) return;   // nothing heard from the heater yet
+
+    // Codes 0x00 and 0x01 both mean normal operation; STANDBY is not a fault.
+    if(changedSince(lastError, heaterStatus.errorCode)) {
+        if(heaterStatus.errorCode > ERR_ON && heaterStatus.errorCode != ERR_STANDBY) {
+            notifyTelegram("🔴 Heater error: " +
+                           String(getErrorName(heaterStatus.errorCode)));
+        }
+    }
+
+    // The state at boot is the status quo, not an event -- prime it silently,
+    // otherwise every restart would announce "heater is OFF".
+    if(!statePrimed) {
+        lastState   = heaterStatus.state;
+        statePrimed = true;
+    } else if(changedSince(lastState, heaterStatus.state)) {
+        notifyTelegram("🔥 Heater: " + String(getStateName(heaterStatus.state)));
+    }
+
+    bool alarm = voltageAlarm(lowVoltage, heaterStatus.voltage,
+                              TG_VOLT_ALARM_DECIV, TG_VOLT_CLEAR_DECIV);
+    if(alarm != lowVoltage) {
+        lowVoltage = alarm;
+        notifyTelegram(alarm
+            ? "🔴 Battery low: " + String(heaterStatus.voltage / 10.0, 1) + " V"
+            : "🟢 Battery recovered: " + String(heaterStatus.voltage / 10.0, 1) + " V");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SHUTDOWN SCHEDULER
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -675,7 +823,7 @@ void updateScheduler() {
             if(heaterEnsureOff()) {
                 shutdownRequested = true;
                 shutdownAtMs      = millis();
-                Serial.println(d.reason == REASON_BLACKOUT
+                notifyTelegram(d.reason == REASON_BLACKOUT
                     ? "⏱ Shutting down ahead of the mains cut"
                     : "⏱ Runtime limit reached, shutting down");
             }
@@ -683,12 +831,12 @@ void updateScheduler() {
 
         case SCHED_COOLDOWN_DONE:
             shutdownRequested = false;
-            Serial.println("✅ Purge finished, heater is off");
+            notifyTelegram("✅ Purge finished, heater is off");
             break;
 
         case SCHED_COOLDOWN_TIMEOUT:
             shutdownRequested = false;
-            Serial.println("⚠️ Heater did not reach OFF within the purge window");
+            notifyTelegram("⚠️ Heater did not reach OFF within the purge window");
             break;
 
         case SCHED_NONE:
@@ -1078,6 +1226,44 @@ void handleAPI_TimerStatus() {
     server.send(200, "application/json", json);
 }
 
+void handleAPI_Telegram() {
+    tgEnabled = formFlag("enabled", tgEnabled);
+    tgToken   = formField("token", tgToken);
+    tgChats   = formField("chats", tgChats);
+    tgCaCert  = formField("caCert", tgCaCert);
+
+    prefs.putBool("tgEnabled", tgEnabled);
+    prefs.putString("tgToken", tgToken);
+    prefs.putString("tgChats", tgChats);
+    prefs.putString("tgCaCert", tgCaCert);
+
+    // Reboot rather than reconfigure in place: both the bot and the TLS
+    // client hold raw pointers into the strings handed to them, and a
+    // reassigned String can move.
+    server.send(200, "text/plain", "Telegram saved! Rebooting...");
+    delay(1000); ESP.restart();
+}
+
+void handleAPI_TelegramStatus() {
+    String json = "{";
+    json += "\"enabled\":" + String(tgEnabled ? "true" : "false") + ",";
+    // The token grants remote control of the heater and is never returned.
+    json += "\"tokenSet\":" + String(tgToken.length() > 0 ? "true" : "false") + ",";
+    json += "\"customCa\":" + String(tgCaCert.length() > 0 ? "true" : "false") + ",";
+    json += "\"connected\":" + String(tgReady ? "true" : "false") + ",";
+    json += "\"chats\":\"" + tgChats + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+void handleAPI_TelegramTest() {
+    if(!tgEnabled)            { server.send(200, "text/plain", "Telegram is disabled"); return; }
+    if(tgChats.length() == 0) { server.send(200, "text/plain", "No chat ids configured"); return; }
+    if(!tgReady)              { server.send(200, "text/plain", "Bot not connected yet"); return; }
+    tgSendToAll("✅ Test message from Diesel Pilot");
+    server.send(200, "text/plain", "Test message sent");
+}
+
 void handleAPI_Info() {
     String json = "{";
     json += "\"hostname\":\"" + deviceName + "\",";
@@ -1163,6 +1349,11 @@ void setup() {
     blackoutMinutes     = prefs.getInt("blackoutMin", 22 * 60);
     shutdownLeadMin     = prefs.getUShort("shutdownLead", 15);
     cooldownExpectedMin = prefs.getUShort("cooldownMin", 5);
+    // Telegram
+    tgEnabled = prefs.getBool("tgEnabled", false);
+    tgToken   = prefs.getString("tgToken", "");
+    tgChats   = prefs.getString("tgChats", "");
+    tgCaCert  = prefs.getString("tgCaCert", "");
 
     if(heaterVersion == "V1") {
         if(prefs.getBytes("addrV1", myAddrV1, 3) != 3) {
@@ -1227,6 +1418,9 @@ void setup() {
     server.on("/api/factory",      handleAPI_Factory);
     server.on("/api/reboot",       handleAPI_Reboot);
     // OTA endpoints
+    server.on("/api/telegram",       handleAPI_Telegram);
+    server.on("/api/telegram/status",handleAPI_TelegramStatus);
+    server.on("/api/telegram/test",  handleAPI_TelegramTest);
     server.on("/api/timers",       handleAPI_Timers);
     server.on("/api/timers/status",handleAPI_TimerStatus);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
@@ -1240,6 +1434,19 @@ void setup() {
     } else {
         Serial.println("⚠️ Watchdog init failed");
     }
+
+    // Queued until the bot connects. esp_reset_reason() turns a useless
+    // "I am up" into diagnostics: power back after the nightly cut is normal,
+    // a watchdog reset means something is hanging.
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool unexpected = (rr == ESP_RST_PANIC || rr == ESP_RST_TASK_WDT ||
+                       rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT ||
+                       rr == ESP_RST_BROWNOUT);
+    notifyTelegram(String(unexpected ? "⚠️ Controller restarted"
+                                     : "🔌 Controller started") +
+                   "\nReason: " + resetReasonName(rr) +
+                   "\nHeater: " + (heaterPaired ? heaterVersion + ", paired"
+                                                 : String("not paired")));
 
     Serial.println("\n✅ Ready! V" + version);
 }
@@ -1257,6 +1464,8 @@ void loop() {
     yield();
     superviseWiFi();
     updateTimeSync();
+    updateTelegram();
+    updateNotifications();
     updateScheduler();
     server.handleClient();
     // MQTT
