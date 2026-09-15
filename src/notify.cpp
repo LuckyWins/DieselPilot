@@ -66,3 +66,16 @@ bool voltageAlarm(bool alarming, uint16_t deciVolts,
     if(alarming)  return deciVolts < clearAbove;
     return deciVolts < alarmBelow;
 }
+
+bool debounceVerdict(bool& state, uint32_t& sinceMs, bool raw,
+                     uint32_t nowMs, uint32_t holdMs) {
+    if(raw == state) {
+        sinceMs = nowMs;      // agreement resets the countdown
+        return state;
+    }
+    if(nowMs - sinceMs >= holdMs) {
+        state   = raw;
+        sinceMs = nowMs;
+    }
+    return state;
+}

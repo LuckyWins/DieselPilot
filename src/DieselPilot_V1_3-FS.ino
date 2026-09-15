@@ -115,10 +115,18 @@
 // How often to check whether NTP has delivered a plausible date yet
 #define NTP_CHECK_MS 5000
 
-// Battery alarm thresholds, tenths of a volt. Diesel heaters draw enough to
-// flatten a battery, and "the car would not start" is worth a warning.
-#define TG_VOLT_ALARM_DECIV 115
-#define TG_VOLT_CLEAR_DECIV 120
+// Supply voltage thresholds, tenths of a volt, and how long a reading must
+// hold before it is reported.
+//
+// This heater runs off a mains PSU, not a battery, so nothing drains the rail
+// slowly. What does pull it down is the glow plug drawing eight to ten amps
+// at ignition -- brief, normal, and not worth a message. A sag that persists
+// means the supply is undersized, which is a common cause of hard starting,
+// and the heater's own cutout only trips around 11.5 V (ERR_UNDERVOLTAGE),
+// so the warning has to come earlier than that.
+#define VOLT_ALARM_DECIV_DEFAULT 120
+#define VOLT_CLEAR_DECIV_DEFAULT 125
+#define VOLT_DEBOUNCE_SEC_DEFAULT 30
 
 // Commands
 #define CMD_WAKEUP 0x23
@@ -209,6 +217,10 @@ uint16_t sessionAutoOffMin = 0;
 // level rather than reading a real rate.
 uint32_t fuelTicks  = 0;
 uint16_t fuelDoseUl = FUEL_DOSE_UL_DEFAULT;
+
+uint16_t voltAlarmDeciV = VOLT_ALARM_DECIV_DEFAULT;
+uint16_t voltClearDeciV = VOLT_CLEAR_DECIV_DEFAULT;
+uint16_t voltDebounceS  = VOLT_DEBOUNCE_SEC_DEFAULT;
 
 // Telegram. The bot is the only remote channel, so the chat whitelist is the
 // single thing standing between a stranger and the heater.
@@ -910,13 +922,20 @@ void updateNotifications() {
         notifyTelegram("🔥 Heater: " + String(getStateName(heaterStatus.state)));
     }
 
-    bool alarm = voltageAlarm(lowVoltage, heaterStatus.voltage,
-                              TG_VOLT_ALARM_DECIV, TG_VOLT_CLEAR_DECIV);
-    if(alarm != lowVoltage) {
-        lowVoltage = alarm;
-        notifyTelegram(alarm
-            ? "🔴 Battery low: " + String(heaterStatus.voltage / 10.0, 1) + " V"
-            : "🟢 Battery recovered: " + String(heaterStatus.voltage / 10.0, 1) + " V");
+    // The raw verdict is instantaneous; the debounce is what keeps the
+    // ignition dip from being announced as a fault every single start.
+    static uint32_t voltSinceMs = 0;
+    bool raw = voltageAlarm(lowVoltage, heaterStatus.voltage,
+                            voltAlarmDeciV, voltClearDeciV);
+    bool was = lowVoltage;
+    bool now = debounceVerdict(lowVoltage, voltSinceMs, raw, millis(),
+                               (uint32_t)voltDebounceS * 1000UL);
+    if(now != was) {
+        notifyTelegram(now
+            ? "🔴 Supply voltage sagging: " +
+              String(heaterStatus.voltage / 10.0, 1) + " V — the PSU may be undersized"
+            : "🟢 Supply voltage back to normal: " +
+              String(heaterStatus.voltage / 10.0, 1) + " V");
     }
 }
 
@@ -1780,6 +1799,9 @@ void handleAPI_Timers() {
     shutdownLeadMin     = formNumber("lead", shutdownLeadMin, 1, 240);
     cooldownExpectedMin = formNumber("cooldown", cooldownExpectedMin, 1, 60);
     fuelDoseUl          = formNumber("fuelDose", fuelDoseUl, 5, 60);
+    voltAlarmDeciV      = formNumber("voltAlarm", voltAlarmDeciV, 80, 160);
+    voltClearDeciV      = formNumber("voltClear", voltClearDeciV, 80, 170);
+    voltDebounceS       = formNumber("voltDeb", voltDebounceS, 1, 600);
 
     prefs.putString("ntpServer", ntpServer);
     prefs.putInt("tzOffsetMin", tzOffsetMin);
@@ -1789,6 +1811,9 @@ void handleAPI_Timers() {
     prefs.putUShort("shutdownLead", shutdownLeadMin);
     prefs.putUShort("cooldownMin", cooldownExpectedMin);
     prefs.putUShort("fuelDoseUl", fuelDoseUl);
+    prefs.putUShort("voltAlarmDv", voltAlarmDeciV);
+    prefs.putUShort("voltClearDv", voltClearDeciV);
+    prefs.putUShort("voltDebSec", voltDebounceS);
 
     setupTime();   // pick up a changed server or offset immediately
     server.send(200, "text/plain", "Timers saved!");
@@ -1826,6 +1851,9 @@ void handleAPI_TimerStatus() {
     json += "\"lead\":" + String(shutdownLeadMin) + ",";
     json += "\"cooldown\":" + String(cooldownExpectedMin) + ",";
     json += "\"fuelDose\":" + String(fuelDoseUl) + ",";
+    json += "\"voltAlarm\":" + String(voltAlarmDeciV) + ",";
+    json += "\"voltClear\":" + String(voltClearDeciV) + ",";
+    json += "\"voltDeb\":" + String(voltDebounceS) + ",";
     json += "\"startArmed\":" + String(startArmed ? "true" : "false") + ",";
     json += "\"startAt\":\"" + (startArmed ? clockOfPublic(startTarget) : String("")) + "\"";
     json += "}";
@@ -2049,6 +2077,9 @@ void setup() {
     startArmed          = prefs.getBool("startArmed", false);
     startTarget         = prefs.getULong("startAt", 0);
     fuelDoseUl          = prefs.getUShort("fuelDoseUl", FUEL_DOSE_UL_DEFAULT);
+    voltAlarmDeciV      = prefs.getUShort("voltAlarmDv", VOLT_ALARM_DECIV_DEFAULT);
+    voltClearDeciV      = prefs.getUShort("voltClearDv", VOLT_CLEAR_DECIV_DEFAULT);
+    voltDebounceS       = prefs.getUShort("voltDebSec", VOLT_DEBOUNCE_SEC_DEFAULT);
     // Telegram
     tgEnabled = prefs.getBool("tgEnabled", false);
     tgToken   = prefs.getString("tgToken", "");

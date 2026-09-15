@@ -619,6 +619,21 @@
                     runtime limit applies.
                 </div>
 
+                <h2 style="font-size:1rem; margin-top:16px;">Supply voltage</h2>
+                <div class="form-row">
+                    <input type="number" id="tmVoltAlarm" min="80" max="160"
+                           placeholder="Warn below, tenths of V (120 = 12.0)">
+                    <input type="number" id="tmVoltClear" min="80" max="170"
+                           placeholder="Clear above (125 = 12.5)">
+                </div>
+                <input type="number" id="tmVoltDeb" min="1" max="600"
+                       placeholder="Hold for N seconds before reporting (30)">
+                <div class="info">
+                    The glow plug pulls eight to ten amps at ignition, so the rail
+                    dips briefly every start. Only a sag that holds is reported —
+                    it means the PSU is undersized, a common cause of hard starting.
+                </div>
+
                 <h2 style="font-size:1rem; margin-top:16px;">Clock</h2>
                 <div class="form-row">
                     <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
@@ -864,6 +879,9 @@
                 document.getElementById('tmLead').value        = d.lead;
                 document.getElementById('tmCooldown').value    = d.cooldown;
                 document.getElementById('tmFuelDose').value    = d.fuelDose;
+                document.getElementById('tmVoltAlarm').value   = d.voltAlarm;
+                document.getElementById('tmVoltClear').value   = d.voltClear;
+                document.getElementById('tmVoltDeb').value     = d.voltDeb;
                 document.getElementById('schedState').textContent = d.startArmed
                     ? 'Start scheduled for ' + d.startAt
                     : 'No start scheduled.';
@@ -898,6 +916,9 @@
             lead:       document.getElementById('tmLead').value,
             cooldown:   document.getElementById('tmCooldown').value,
             fuelDose:   document.getElementById('tmFuelDose').value,
+            voltAlarm:  document.getElementById('tmVoltAlarm').value,
+            voltClear:  document.getElementById('tmVoltClear').value,
+            voltDeb:    document.getElementById('tmVoltDeb').value,
             ntpServer:  document.getElementById('tmNtp').value,
             tzOffset:   document.getElementById('tmTz').value
         });

@@ -108,6 +108,45 @@ void test_voltage_alarm_ignores_a_missing_reading(void) {
     TEST_ASSERT_TRUE(voltageAlarm(true, 0, 115, 120));
 }
 
+
+// -- Debounce --──────────────────────────────────────────────────────────────
+
+// The glow plug pulls the rail down for a few seconds at every ignition. That
+// dip must not be reported; a sag that persists must be.
+void test_debounce_ignores_a_brief_dip(void) {
+    bool state = false; uint32_t since = 0;
+    TEST_ASSERT_FALSE(debounceVerdict(state, since, true, 5000, 30000));
+    TEST_ASSERT_FALSE(debounceVerdict(state, since, true, 20000, 30000));
+    TEST_ASSERT_FALSE(debounceVerdict(state, since, false, 25000, 30000));
+    TEST_ASSERT_FALSE(state);
+}
+
+void test_debounce_accepts_a_sustained_change(void) {
+    bool state = false; uint32_t since = 0;
+    TEST_ASSERT_FALSE(debounceVerdict(state, since, true, 29000, 30000));
+    TEST_ASSERT_TRUE (debounceVerdict(state, since, true, 30000, 30000));
+    TEST_ASSERT_TRUE(state);
+}
+
+// Recovery is debounced the same way, so a momentary rebound does not clear
+// a real alarm.
+void test_debounce_is_symmetric(void) {
+    bool state = true; uint32_t since = 0;
+    TEST_ASSERT_TRUE (debounceVerdict(state, since, false, 10000, 30000));
+    TEST_ASSERT_FALSE(debounceVerdict(state, since, false, 40000, 30000));
+}
+
+// Agreement restarts the countdown, so alternating readings never accumulate
+// into a change.
+void test_debounce_flapping_never_settles(void) {
+    bool state = false; uint32_t since = 0;
+    for(uint32_t t = 0; t < 300000; t += 10000) {
+        debounceVerdict(state, since, true,  t, 30000);
+        debounceVerdict(state, since, false, t + 5000, 30000);
+    }
+    TEST_ASSERT_FALSE(state);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -130,6 +169,11 @@ int main(int, char**) {
     RUN_TEST(test_voltage_alarm_trips_below_the_threshold);
     RUN_TEST(test_voltage_alarm_does_not_flap);
     RUN_TEST(test_voltage_alarm_ignores_a_missing_reading);
+
+    RUN_TEST(test_debounce_ignores_a_brief_dip);
+    RUN_TEST(test_debounce_accepts_a_sustained_change);
+    RUN_TEST(test_debounce_is_symmetric);
+    RUN_TEST(test_debounce_flapping_never_settles);
 
     return UNITY_END();
 }

@@ -42,3 +42,16 @@ bool changedSince(int& stored, int current);
 // matching heaterStatus.voltage.
 bool voltageAlarm(bool alarming, uint16_t deciVolts,
                   uint16_t alarmBelow, uint16_t clearAbove);
+
+// Holds a raw verdict for a while before acting on it.
+//
+// Needed because the heater runs off a mains PSU here, not a battery: the
+// only thing that pulls the rail down is the glow plug drawing eight to ten
+// amps at ignition. That dip is normal and brief. A sag that persists is the
+// interesting one -- it means the supply is undersized, which is a common
+// cause of hard starting.
+//
+// `sinceMs` holds when the raw verdict last changed; both it and `state` are
+// owned by the caller so this stays a pure function.
+bool debounceVerdict(bool& state, uint32_t& sinceMs, bool raw,
+                     uint32_t nowMs, uint32_t holdMs);
