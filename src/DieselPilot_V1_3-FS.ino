@@ -226,6 +226,12 @@ bool heaterPaired = false;
 uint32_t lastHeaterCommandMs = 0;
 uint32_t lastTgActivityMs    = 0;
 
+// Loop health. With physical access this rare, these are the difference
+// between "it feels slow" and a number readable from a hundred kilometres
+// away. The minimum free heap is the one that matters: a slow leak or heap
+// fragmentation shows up there long before anything visibly breaks.
+uint32_t loopMaxMs = 0;
+
 // V2 pairing runs as a state machine in loop() rather than blocking the
 // request handler for a minute.
 enum PairState { PAIR_IDLE, PAIR_SEARCHING, PAIR_OK, PAIR_FAILED };
@@ -913,6 +919,9 @@ static String tgStatusText() {
     m += "\nUpdated:  " + String(age) + " s ago";
     if(age > 30) m += "  (stale)";
     m += "\nClock:    " + String(timeValid ? currentTimeString() : String("not synced"));
+    m += "\nHeap:     " + String(ESP.getFreeHeap() / 1024) + " KB free, min " +
+         String(ESP.getMinFreeHeap() / 1024) + " KB";
+    m += "\nLoop max: " + String(loopMaxMs) + " ms";
     return m;
 }
 
@@ -1647,6 +1656,9 @@ void handleAPI_Info() {
     json += "\"mqtt\":\"" + String(mqttEnabled && mqtt.connected() ? "Connected" : "Disconnected") + "\",";
     json += "\"ota\":\"" + String(otaEnabled ? "Enabled" : "Disabled") + "\",";
     json += "\"uptime\":\"" + String(millis() / 1000 / 60) + " min\",";
+    json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
+    json += "\"minFreeHeap\":" + String(ESP.getMinFreeHeap()) + ",";
+    json += "\"loopMaxMs\":" + String(loopMaxMs) + ",";
     json += "\"time\":\"" + String(timeValid ? currentTimeString() : "not synced") + "\",";
     json += "\"version\":\"" + version + "\"";
     json += "}";
@@ -1852,6 +1864,16 @@ void loop() {
     static unsigned long lastDisplayUpdate = 0;
     static unsigned long lastCC1101Retry = 0;
     static unsigned long lastSlowTick = 0;
+
+    // Measured from the previous iteration, so it covers everything the loop
+    // did -- including the blocking parts, which are what we want to see.
+    static uint32_t loopPrevMs = 0;
+    uint32_t loopNow = millis();
+    if(loopPrevMs != 0) {
+        uint32_t took = loopNow - loopPrevMs;
+        if(took > loopMaxMs) loopMaxMs = took;
+    }
+    loopPrevMs = loopNow;
 
     feedWatchdog();
     yield();

@@ -696,6 +696,14 @@
                         <div class="status-label">Uptime</div>
                         <div class="status-value" style="font-size:1rem;" id="uptime">--</div>
                     </div>
+                    <div class="status-item">
+                        <div class="status-label">Heap free / min</div>
+                        <div class="status-value" style="font-size:1rem;" id="heap">--</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">Loop max</div>
+                        <div class="status-value" style="font-size:1rem;" id="loopMax">--</div>
+                    </div>
                 </div>
                 <h2 style="font-size:1rem; margin-top:16px;">Recent errors</h2>
                 <div class="info" id="errorHistory">none recorded</div>
@@ -1066,6 +1074,10 @@
                 document.getElementById('otaInfoStatus').textContent = data.ota;
                 document.getElementById('uptime').textContent        = data.uptime;
                 document.getElementById('sysTime').textContent       = data.time;
+                document.getElementById('heap').textContent =
+                    Math.round(data.freeHeap / 1024) + ' / ' +
+                    Math.round(data.minFreeHeap / 1024) + ' KB';
+                document.getElementById('loopMax').textContent = data.loopMaxMs + ' ms';
                 document.getElementById('fwVersion').textContent     = data.version;
                 // Keep the header pill live, but DON'T touch the OTA toggle here.
                 setOtaPill(data.ota === 'Enabled');
