@@ -121,3 +121,44 @@ struct IgnitionInput {
 };
 
 IgnitionAction checkIgnition(const IgnitionInput& in);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEDULED START
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The whole point of this installation is a preheat an hour or two before
+// arrival, which otherwise means remembering to press a button at the right
+// moment. The target is stored as an absolute epoch timestamp rather than a
+// time of day: mains power is cut overnight, so a schedule set in the evening
+// has to survive a reboot, and "is 07:00 today or tomorrow" has no answer
+// after one.
+
+// How late a start may fire after its target. Booting at 06:05 for a 06:00
+// schedule is a late start; three hours after a blackout is a surprise.
+#define START_GRACE_MIN 30
+
+enum StartAction {
+    START_NONE = 0,       // waiting, or nothing scheduled
+    START_FIRE,           // light the heater now
+    START_MISSED,         // the target passed while the controller was down
+    START_SKIP_RUNNING,   // already burning, nothing to do
+};
+
+struct StartInput {
+    bool     armed;
+    uint32_t targetEpoch;
+    uint32_t nowEpoch;
+    bool     timeValid;
+    uint8_t  heaterState;
+    bool     heaterPaired;
+    uint16_t graceMin;
+};
+
+StartAction decideStart(const StartInput& in);
+
+// True if a start at `startMinutes` would land inside the window during which
+// the scheduler shuts the heater down before the mains cut -- where it would
+// be lit and immediately stopped. Checked when the schedule is set, so the
+// refusal is immediate and explained rather than surprising later.
+bool startCollidesWithShutdown(int startMinutes, int blackoutMinutes,
+                               int shutdownLeadMin);

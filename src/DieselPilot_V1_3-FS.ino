@@ -188,6 +188,12 @@ int      blackoutMinutes     = 22 * 60;
 uint16_t shutdownLeadMin     = 15;
 uint16_t cooldownExpectedMin = 5;
 
+// Scheduled start. Stored as an absolute epoch so it survives the overnight
+// power cut -- a time of day could not say whether it meant today or tomorrow
+// after a reboot.
+bool     startArmed  = false;
+uint32_t startTarget = 0;
+
 // Telegram. The bot is the only remote channel, so the chat whitelist is the
 // single thing standing between a stranger and the heater.
 bool   tgEnabled = false;
@@ -900,6 +906,14 @@ void updateNotifications() {
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
+// Defined further down, with the rest of the scheduling code.
+void     cancelScheduledStartPublic();
+bool     scheduleStartAt(int hour, int minute, String& reply);
+bool     scheduleStartIn(int minutes, String& reply);
+extern bool     startArmed;
+extern uint32_t startTarget;
+String   clockOfPublic(uint32_t epoch);
+
 static String tgStatusText() {
     String m = "🔥 Diesel Pilot\n\n";
 
@@ -932,6 +946,9 @@ static String tgStatusText() {
     uint32_t age = (millis() - heaterStatus.lastUpdate) / 1000;
     m += "\nUpdated:  " + String(age) + " s ago";
     if(age > 30) m += "  (stale)";
+    if(startArmed) {
+        m += "\nScheduled start: " + clockOfPublic(startTarget);
+    }
     m += "\nClock:    " + String(timeValid ? currentTimeString() : String("not synced"));
     m += "\nHeap:     " + String(ESP.getFreeHeap() / 1024) + " KB free, min " +
          String(ESP.getMinFreeHeap() / 1024) + " KB";
@@ -969,7 +986,38 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
             "/status - current readings and buttons\n"
             "/on - start the heater\n"
             "/off - stop it (a purge follows)\n"
+            "/at 06:30 - start at that time\n"
+            "/in 2h - start after that delay\n"
+            "/cancel - drop a pending scheduled start\n"
             "/id - show your chat id");
+        return;
+    }
+
+    if(cmd == "/cancel") {
+        cancelScheduledStartPublic();
+        tgBot.sendTo(chatId, "Scheduled start cancelled");
+        return;
+    }
+
+    if(cmd.startsWith("/at ")) {
+        String arg = cmd.substring(4); arg.trim();
+        int colon = arg.indexOf(':');
+        if(colon < 1) { tgBot.sendTo(chatId, "Use /at HH:MM"); return; }
+        String reply;
+        scheduleStartAt(arg.substring(0, colon).toInt(),
+                        arg.substring(colon + 1).toInt(), reply);
+        tgBot.sendTo(chatId, reply);
+        return;
+    }
+
+    if(cmd.startsWith("/in ")) {
+        String arg = cmd.substring(4); arg.trim();
+        // Accepts "2h", "90m" or a bare number of minutes.
+        long value = arg.toInt();
+        if(arg.endsWith("h")) value *= 60;
+        String reply;
+        scheduleStartIn((int)value, reply);
+        tgBot.sendTo(chatId, reply);
         return;
     }
 
@@ -1085,6 +1133,124 @@ void updateIgnition() {
             break;
 
         case IGN_NONE:
+        default:
+            break;
+    }
+}
+
+// ── Scheduled start ────────────────────────────────────────────────────────
+
+static void cancelScheduledStart() {
+    startArmed  = false;
+    startTarget = 0;
+    prefs.putBool("startArmed", false);
+}
+
+static void armScheduledStart(uint32_t epoch) {
+    startArmed  = true;
+    startTarget = epoch;
+    prefs.putBool("startArmed", true);
+    prefs.putULong("startAt", epoch);
+}
+
+static String clockOf(uint32_t epoch) {
+    time_t t = (time_t)epoch;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", lt.tm_hour, lt.tm_min);
+    return String(buf);
+}
+
+void cancelScheduledStartPublic() { cancelScheduledStart(); }
+String clockOfPublic(uint32_t epoch) { return clockOf(epoch); }
+
+// Turns a wall-clock request into an absolute target, taking the next
+// occurrence of that time. Refuses anything that could not work rather than
+// accepting it and behaving oddly later.
+bool scheduleStartAt(int hour, int minute, String& reply) {
+    if(!timeValid) {
+        reply = "Cannot schedule: the clock is not synced yet";
+        return false;
+    }
+    if(hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        reply = "Use /at HH:MM";
+        return false;
+    }
+    if(!heaterPaired) {
+        reply = "Cannot schedule: no heater is paired";
+        return false;
+    }
+
+    int wanted = hour * 60 + minute;
+    if(blackoutEnabled &&
+       startCollidesWithShutdown(wanted, blackoutMinutes, shutdownLeadMin)) {
+        reply = "That lands in the window before the power cut — it would be "
+                "lit and stopped straight away";
+        return false;
+    }
+
+    time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    lt.tm_hour = hour; lt.tm_min = minute; lt.tm_sec = 0;
+    time_t target = mktime(&lt);
+    if(target <= now) target += 24 * 3600;   // the next occurrence
+
+    armScheduledStart((uint32_t)target);
+    long inMin = (long)(target - now) / 60;
+    reply = "Scheduled for " + clockOf((uint32_t)target) + " — in " +
+            String(inMin / 60) + " h " + String(inMin % 60) + " min";
+    return true;
+}
+
+bool scheduleStartIn(int minutes, String& reply) {
+    if(minutes < 1 || minutes > 24 * 60) {
+        reply = "Use /in 2h or /in 90";
+        return false;
+    }
+    if(!timeValid) {
+        reply = "Cannot schedule: the clock is not synced yet";
+        return false;
+    }
+    time_t target = time(nullptr) + (time_t)minutes * 60;
+    struct tm lt;
+    localtime_r(&target, &lt);
+    return scheduleStartAt(lt.tm_hour, lt.tm_min, reply);
+}
+
+void updateScheduledStart() {
+    StartInput in;
+    in.armed        = startArmed;
+    in.targetEpoch  = startTarget;
+    in.nowEpoch     = timeValid ? (uint32_t)time(nullptr) : 0;
+    in.timeValid    = timeValid;
+    in.heaterState  = heaterStatus.state;
+    in.heaterPaired = heaterPaired;
+    in.graceMin     = START_GRACE_MIN;
+
+    switch(decideStart(in)) {
+        case START_FIRE:
+            cancelScheduledStart();
+            if(heaterEnsureOn()) {
+                notifyTelegram("⏰ Scheduled start — igniting");
+            } else {
+                notifyTelegram("⚠️ Scheduled start could not be sent");
+            }
+            break;
+
+        case START_MISSED:
+            cancelScheduledStart();
+            notifyTelegram("⚠️ Missed the start scheduled for " +
+                           clockOf(in.targetEpoch) + " — no power at the time");
+            break;
+
+        case START_SKIP_RUNNING:
+            cancelScheduledStart();
+            notifyTelegram("⏰ Scheduled start skipped — already running");
+            break;
+
+        case START_NONE:
         default:
             break;
     }
@@ -1567,6 +1733,25 @@ void handleAPI_Timers() {
     server.send(200, "text/plain", "Timers saved!");
 }
 
+void handleAPI_Schedule() {
+    if(!csrfOk()) return;
+
+    if(server.arg("cancel") == "1") {
+        cancelScheduledStartPublic();
+        server.send(200, "text/plain", "Scheduled start cancelled");
+        return;
+    }
+
+    String at = server.arg("at");          // "HH:MM"
+    int colon = at.indexOf(':');
+    if(colon < 1) { server.send(400, "text/plain", "Use at=HH:MM"); return; }
+
+    String reply;
+    bool ok = scheduleStartAt(at.substring(0, colon).toInt(),
+                              at.substring(colon + 1).toInt(), reply);
+    server.send(ok ? 200 : 400, "text/plain", reply);
+}
+
 void handleAPI_TimerStatus() {
     String json = "{";
     json.reserve(320);
@@ -1578,7 +1763,9 @@ void handleAPI_TimerStatus() {
     json += "\"blackoutEn\":" + String(blackoutEnabled ? "true" : "false") + ",";
     json += "\"blackout\":" + String(blackoutMinutes) + ",";
     json += "\"lead\":" + String(shutdownLeadMin) + ",";
-    json += "\"cooldown\":" + String(cooldownExpectedMin);
+    json += "\"cooldown\":" + String(cooldownExpectedMin) + ",";
+    json += "\"startArmed\":" + String(startArmed ? "true" : "false") + ",";
+    json += "\"startAt\":\"" + (startArmed ? clockOfPublic(startTarget) : String("")) + "\"";
     json += "}";
     server.send(200, "application/json", json);
 }
@@ -1797,6 +1984,8 @@ void setup() {
     blackoutMinutes     = prefs.getInt("blackoutMin", 22 * 60);
     shutdownLeadMin     = prefs.getUShort("shutdownLead", 15);
     cooldownExpectedMin = prefs.getUShort("cooldownMin", 5);
+    startArmed          = prefs.getBool("startArmed", false);
+    startTarget         = prefs.getULong("startAt", 0);
     // Telegram
     tgEnabled = prefs.getBool("tgEnabled", false);
     tgToken   = prefs.getString("tgToken", "");
@@ -1881,6 +2070,7 @@ void setup() {
     server.on("/api/telegram/test",  handleAPI_TelegramTest);
     server.on("/api/telegram/discover", handleAPI_TelegramDiscover);
     server.on("/api/timers",       handleAPI_Timers);
+    server.on("/api/schedule",     handleAPI_Schedule);
     server.on("/api/timers/status",handleAPI_TimerStatus);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
     server.on("/api/ota/config",   handleAPI_OTAConfig);
@@ -1950,6 +2140,7 @@ void loop() {
         lastSlowTick = millis();
         updateTelegramPollRate();
         updateIgnition();
+        updateScheduledStart();
         updateNotifications();
         updateScheduler();
     }

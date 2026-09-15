@@ -291,6 +291,97 @@ void test_ignition_confirmed_even_if_someone_else_started_it(void) {
     TEST_ASSERT_EQUAL(IGN_CONFIRMED, checkIgnition(in));
 }
 
+
+// -- Scheduled start --──────────────────────────────────────────────────────
+
+// An arbitrary but realistic epoch: the exact value does not matter, only the
+// differences between now and the target.
+static const uint32_t EPOCH_NOW = 1788000000UL;
+
+// A schedule armed for five minutes from now, heater cold, clock synced.
+static StartInput baseStart(void) {
+    StartInput in;
+    in.armed        = true;
+    in.targetEpoch  = EPOCH_NOW + 5 * 60;
+    in.nowEpoch     = EPOCH_NOW;
+    in.timeValid    = true;
+    in.heaterState  = STATE_OFF;
+    in.heaterPaired = true;
+    in.graceMin     = START_GRACE_MIN;
+    return in;
+}
+
+void test_start_waits_until_its_time(void) {
+    TEST_ASSERT_EQUAL(START_NONE, decideStart(baseStart()));
+}
+
+void test_start_fires_on_time(void) {
+    StartInput in = baseStart();
+    in.nowEpoch = in.targetEpoch;
+    TEST_ASSERT_EQUAL(START_FIRE, decideStart(in));
+}
+
+void test_start_still_fires_slightly_late(void) {
+    StartInput in = baseStart();
+    in.nowEpoch = in.targetEpoch + 29 * 60;   // grace is 30 minutes
+    TEST_ASSERT_EQUAL(START_FIRE, decideStart(in));
+}
+
+// The realistic case: the schedule fell inside the overnight power cut, and
+// the controller only came back hours later.
+void test_start_missed_while_powered_down(void) {
+    StartInput in = baseStart();
+    in.nowEpoch = in.targetEpoch + 3 * 3600;
+    TEST_ASSERT_EQUAL(START_MISSED, decideStart(in));
+}
+
+void test_start_disarmed_does_nothing(void) {
+    StartInput in = baseStart();
+    in.armed    = false;
+    in.nowEpoch = in.targetEpoch + 60;
+    TEST_ASSERT_EQUAL(START_NONE, decideStart(in));
+}
+
+// A clock still on the 1970 epoch would make every schedule look overdue.
+void test_start_never_fires_without_a_synced_clock(void) {
+    StartInput in = baseStart();
+    in.timeValid = false;
+    in.nowEpoch  = in.targetEpoch + 60;
+    TEST_ASSERT_EQUAL(START_NONE, decideStart(in));
+}
+
+void test_start_skipped_when_already_burning(void) {
+    StartInput in = baseStart();
+    in.nowEpoch    = in.targetEpoch;
+    in.heaterState = STATE_RUNNING;
+    TEST_ASSERT_EQUAL(START_SKIP_RUNNING, decideStart(in));
+}
+
+void test_start_needs_a_paired_heater(void) {
+    StartInput in = baseStart();
+    in.heaterPaired = false;
+    in.nowEpoch     = in.targetEpoch;
+    TEST_ASSERT_EQUAL(START_NONE, decideStart(in));
+}
+
+// A start inside the pre-blackout window would be lit and stopped moments
+// later, so it is refused when the schedule is set rather than obeyed.
+void test_start_collision_with_the_shutdown_window(void) {
+    // Blackout 22:00, shut down 15 minutes earlier -> window is 21:45..22:00
+    TEST_ASSERT_TRUE (startCollidesWithShutdown(21 * 60 + 50, 22 * 60, 15));
+    TEST_ASSERT_TRUE (startCollidesWithShutdown(21 * 60 + 45, 22 * 60, 15));
+    TEST_ASSERT_FALSE(startCollidesWithShutdown(21 * 60 + 44, 22 * 60, 15));
+    TEST_ASSERT_FALSE(startCollidesWithShutdown(22 * 60,      22 * 60, 15));
+    TEST_ASSERT_FALSE(startCollidesWithShutdown(6 * 60,       22 * 60, 15));
+}
+
+void test_start_collision_when_the_window_wraps_midnight(void) {
+    // Blackout 00:30, shut down 45 minutes earlier -> window is 23:45..00:30
+    TEST_ASSERT_TRUE (startCollidesWithShutdown(23 * 60 + 50, 30, 45));
+    TEST_ASSERT_TRUE (startCollidesWithShutdown(10,           30, 45));
+    TEST_ASSERT_FALSE(startCollidesWithShutdown(23 * 60 + 40, 30, 45));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -324,6 +415,17 @@ int main(int, char**) {
     RUN_TEST(test_ignition_never_retries_on_stale_data);
     RUN_TEST(test_ignition_does_not_confirm_on_stale_data);
     RUN_TEST(test_ignition_confirmed_even_if_someone_else_started_it);
+
+    RUN_TEST(test_start_waits_until_its_time);
+    RUN_TEST(test_start_fires_on_time);
+    RUN_TEST(test_start_still_fires_slightly_late);
+    RUN_TEST(test_start_missed_while_powered_down);
+    RUN_TEST(test_start_disarmed_does_nothing);
+    RUN_TEST(test_start_never_fires_without_a_synced_clock);
+    RUN_TEST(test_start_skipped_when_already_burning);
+    RUN_TEST(test_start_needs_a_paired_heater);
+    RUN_TEST(test_start_collision_with_the_shutdown_window);
+    RUN_TEST(test_start_collision_when_the_window_wraps_midnight);
 
     RUN_TEST(test_day_window_basics);
 

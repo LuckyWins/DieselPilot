@@ -89,3 +89,36 @@ IgnitionAction checkIgnition(const IgnitionInput& in) {
 
     return IGN_FAILED;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEDULED START
+// ═══════════════════════════════════════════════════════════════════════════
+
+StartAction decideStart(const StartInput& in) {
+    if(!in.armed || !in.heaterPaired) return START_NONE;
+
+    // Comparing epochs against a clock that still believes it is 1970 would
+    // fire everything at once.
+    if(!in.timeValid) return START_NONE;
+
+    if(in.nowEpoch < in.targetEpoch) return START_NONE;
+
+    // Too late to be a preheat. A heater that lights itself hours after the
+    // time it was asked for is a surprise, not a service -- most often this
+    // is a schedule that fell inside the overnight power cut.
+    if(in.nowEpoch - in.targetEpoch > (uint32_t)in.graceMin * 60UL) {
+        return START_MISSED;
+    }
+
+    if(in.heaterState != STATE_OFF) return START_SKIP_RUNNING;
+
+    return START_FIRE;
+}
+
+bool startCollidesWithShutdown(int startMinutes, int blackoutMinutes,
+                               int shutdownLeadMin) {
+    int deadline = blackoutMinutes - shutdownLeadMin;
+    while(deadline < 0) deadline += MINUTES_PER_DAY;
+    deadline %= MINUTES_PER_DAY;
+    return inDayWindow(startMinutes, deadline, blackoutMinutes);
+}

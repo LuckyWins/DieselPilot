@@ -577,6 +577,20 @@
                     <span id="tmSync"></span>
                 </div>
 
+                <h2 style="font-size:1rem; margin-top:16px;">Scheduled start</h2>
+                <div class="info" id="schedState">No start scheduled.</div>
+                <div class="form-row">
+                    <input type="time" id="schedAt" title="When to light the heater">
+                    <button onclick="setSchedule()">⏰ SCHEDULE</button>
+                </div>
+                <button class="danger" onclick="cancelSchedule()">✕ CANCEL SCHEDULE</button>
+                <div class="info">
+                    Needs a synced clock, and is refused if it would land in the
+                    window where the heater gets stopped before the power cut.
+                    Survives a reboot, so an evening schedule still fires after
+                    the overnight outage.
+                </div>
+
                 <h2 style="font-size:1rem; margin-top:16px;">Runtime limit</h2>
                 <input type="number" id="tmAutoOff" min="0" max="1440"
                        placeholder="Auto-off after N minutes (0 = disabled)">
@@ -847,12 +861,29 @@
                 document.getElementById('tmBlackoutAt').value  = toHHMM(d.blackout);
                 document.getElementById('tmLead').value        = d.lead;
                 document.getElementById('tmCooldown').value    = d.cooldown;
+                document.getElementById('schedState').textContent = d.startArmed
+                    ? 'Start scheduled for ' + d.startAt
+                    : 'No start scheduled.';
                 document.getElementById('tmNtp').value         = d.ntpServer;
                 document.getElementById('tmTz').value          = d.tzOffset;
             })
             .catch(() => {
                 document.getElementById('tmNow').textContent = 'unreachable';
             });
+    }
+
+    function setSchedule() {
+        const at = document.getElementById('schedAt').value;
+        if(!at) { alert('Pick a time first'); return; }
+        post('/api/schedule?at=' + encodeURIComponent(at))
+            .then(msg => { alert(msg); updateTimersUI(); })
+            .catch(() => alert('Device unreachable'));
+    }
+
+    function cancelSchedule() {
+        post('/api/schedule?cancel=1')
+            .then(msg => { alert(msg); updateTimersUI(); })
+            .catch(() => alert('Device unreachable'));
     }
 
     function saveTimers() {
