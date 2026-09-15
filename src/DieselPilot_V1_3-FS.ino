@@ -40,6 +40,7 @@
 
 #include "protocol.h"           // States, error codes, CRC, frequency maths
 #include "settings.h"           // Settings form parsing
+#include "scheduler.h"          // Shutdown timers
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HARDWARE CONFIG
@@ -76,6 +77,9 @@
 // the link can be down for hours, so retries back off instead of hammering.
 #define WIFI_RETRY_MIN_MS 5000
 #define WIFI_RETRY_MAX_MS 300000
+
+// How often to check whether NTP has delivered a plausible date yet
+#define NTP_CHECK_MS 5000
 
 // Commands
 #define CMD_WAKEUP 0x23
@@ -131,6 +135,19 @@ bool mqttEnabled = false;
 
 // CC1101: module does not answer over SPI (broken wiring, no power)
 bool cc1101Fault = false;
+
+// Wall clock. Needed for the blackout deadline and for timestamps; the ESP32
+// boots believing it is 1970, so nothing may trust it before the first sync.
+bool   timeValid   = false;
+String ntpServer   = "pool.ntp.org";
+int    tzOffsetMin = 180;              // UTC+3, Belarus, no DST
+
+// Shutdown scheduling
+uint16_t autoOffMin          = 180;    // runtime limit, 0 = disabled
+bool     blackoutEnabled     = true;
+int      blackoutMinutes     = 22 * 60;
+uint16_t shutdownLeadMin     = 15;
+uint16_t cooldownExpectedMin = 5;
 
 // Heater
 uint32_t heaterAddress = 0x00000000;
@@ -541,6 +558,157 @@ uint32_t findHeater(uint16_t timeout) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// EXPLICIT HEATER CONTROL
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The protocol only offers a power toggle, which is unusable for anything
+// automatic: a toggle sent to an already-off heater switches it on. These
+// wrappers look at the reported state first and return whether a command
+// was actually sent.
+
+bool heaterEnsureOff() {
+    if(!heaterPaired) return false;
+    if(heaterIsOffOrStopping(heaterStatus.state)) return false;
+    sendCommand(CMD_POWER);
+    return true;
+}
+
+bool heaterEnsureOn() {
+    if(!heaterPaired) return false;
+    // Only from a full stop. Toggling mid-purge does not restart the heater
+    // on these units, and the command would simply be lost.
+    if(heaterStatus.state != STATE_OFF) return false;
+    sendCommand(CMD_POWER);
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WALL CLOCK
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Belarus sits at UTC+3 with no daylight saving, so a plain offset is enough
+// and no POSIX timezone rule is needed.
+void setupTime() {
+    configTime(tzOffsetMin * 60, 0, ntpServer.c_str(), "time.google.com");
+}
+
+// Any year past 2024 means SNTP has answered; the 1970 epoch means it has not.
+static bool clockLooksSynced() {
+    struct tm t;
+    if(!getLocalTime(&t, 0)) return false;
+    return (t.tm_year + 1900) > 2024;
+}
+
+// Minutes since local midnight, or -1 while the clock is unusable.
+int currentMinutesOfDay() {
+    struct tm t;
+    if(!getLocalTime(&t, 0)) return -1;
+    return t.tm_hour * 60 + t.tm_min;
+}
+
+String currentTimeString() {
+    struct tm t;
+    if(!getLocalTime(&t, 0)) return String("--:--");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", t.tm_hour, t.tm_min);
+    return String(buf);
+}
+
+// SNTP keeps polling on its own once it succeeds, so this only has to watch
+// for the first sync.
+void updateTimeSync() {
+    if(timeValid) return;
+
+    static unsigned long lastCheck = 0;
+    if(millis() - lastCheck < NTP_CHECK_MS) return;
+    lastCheck = millis();
+
+    if(clockLooksSynced()) {
+        timeValid = true;
+        Serial.println("✅ Time synced: " + currentTimeString());
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SHUTDOWN SCHEDULER
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Thin wrapper around decideShutdown(): gathers state, executes the verdict.
+// All the reasoning lives in scheduler.cpp so it can be tested on the host.
+void updateScheduler() {
+    static bool     shutdownRequested  = false;
+    static uint32_t shutdownAtMs       = 0;
+    static uint32_t heaterOnSinceMs    = 0;
+    static bool     heaterOnSinceValid = false;
+    static bool     warnedNoTime       = false;
+
+    if(heaterStatus.state == STATE_OFF) {
+        heaterOnSinceValid = false;
+    } else if(!heaterOnSinceValid) {
+        // Either the heater just started, or the controller rebooted while it
+        // was already running. In the second case the runtime limit counts
+        // from now -- conservative, but better than never firing at all.
+        heaterOnSinceMs    = millis();
+        heaterOnSinceValid = true;
+    }
+
+    SchedulerInput in;
+    in.heaterState         = heaterStatus.state;
+    in.heaterPaired        = heaterPaired;
+    in.nowMs               = millis();
+    in.heaterOnSinceMs     = heaterOnSinceMs;
+    in.heaterOnSinceValid  = heaterOnSinceValid;
+    in.timeValid           = timeValid;
+    in.nowMinutes          = timeValid ? currentMinutesOfDay() : -1;
+    in.shutdownRequested   = shutdownRequested;
+    in.shutdownAtMs        = shutdownAtMs;
+    in.autoOffMin          = autoOffMin;
+    in.blackoutEnabled     = blackoutEnabled;
+    in.blackoutMinutes     = blackoutMinutes;
+    in.shutdownLeadMin     = shutdownLeadMin;
+    in.cooldownExpectedMin = cooldownExpectedMin;
+
+    SchedulerDecision d = decideShutdown(in);
+
+    switch(d.action) {
+        case SCHED_SHUT_DOWN:
+            if(heaterEnsureOff()) {
+                shutdownRequested = true;
+                shutdownAtMs      = millis();
+                Serial.println(d.reason == REASON_BLACKOUT
+                    ? "⏱ Shutting down ahead of the mains cut"
+                    : "⏱ Runtime limit reached, shutting down");
+            }
+            break;
+
+        case SCHED_COOLDOWN_DONE:
+            shutdownRequested = false;
+            Serial.println("✅ Purge finished, heater is off");
+            break;
+
+        case SCHED_COOLDOWN_TIMEOUT:
+            shutdownRequested = false;
+            Serial.println("⚠️ Heater did not reach OFF within the purge window");
+            break;
+
+        case SCHED_NONE:
+        default:
+            break;
+    }
+
+    // The deadline silently does nothing without a synced clock, so say so.
+    // This is the realistic morning case: mains returns before the modem does.
+    if(blackoutEnabled && !timeValid) {
+        if(!warnedNoTime) {
+            warnedNoTime = true;
+            Serial.println("⚠️ Blackout deadline inactive: clock not synced");
+        }
+    } else {
+        warnedNoTime = false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WIFI SUPERVISION
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -874,6 +1042,42 @@ void handleAPI_MQTT() {
     if(mqttEnabled) connectMQTT();
 }
 
+void handleAPI_Timers() {
+    ntpServer           = formField("ntpServer", ntpServer);
+    tzOffsetMin         = formNumber("tzOffset", tzOffsetMin, -720, 840);
+    autoOffMin          = formNumber("autoOff", autoOffMin, 0, 1440);
+    blackoutEnabled     = formFlag("blackoutEn", blackoutEnabled);
+    blackoutMinutes     = formNumber("blackout", blackoutMinutes, 0, 1439);
+    shutdownLeadMin     = formNumber("lead", shutdownLeadMin, 1, 240);
+    cooldownExpectedMin = formNumber("cooldown", cooldownExpectedMin, 1, 60);
+
+    prefs.putString("ntpServer", ntpServer);
+    prefs.putInt("tzOffsetMin", tzOffsetMin);
+    prefs.putUShort("autoOffMin", autoOffMin);
+    prefs.putBool("blackoutEn", blackoutEnabled);
+    prefs.putInt("blackoutMin", blackoutMinutes);
+    prefs.putUShort("shutdownLead", shutdownLeadMin);
+    prefs.putUShort("cooldownMin", cooldownExpectedMin);
+
+    setupTime();   // pick up a changed server or offset immediately
+    server.send(200, "text/plain", "Timers saved!");
+}
+
+void handleAPI_TimerStatus() {
+    String json = "{";
+    json += "\"timeValid\":" + String(timeValid ? "true" : "false") + ",";
+    json += "\"now\":\"" + currentTimeString() + "\",";
+    json += "\"ntpServer\":\"" + ntpServer + "\",";
+    json += "\"tzOffset\":" + String(tzOffsetMin) + ",";
+    json += "\"autoOff\":" + String(autoOffMin) + ",";
+    json += "\"blackoutEn\":" + String(blackoutEnabled ? "true" : "false") + ",";
+    json += "\"blackout\":" + String(blackoutMinutes) + ",";
+    json += "\"lead\":" + String(shutdownLeadMin) + ",";
+    json += "\"cooldown\":" + String(cooldownExpectedMin);
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
 void handleAPI_Info() {
     String json = "{";
     json += "\"hostname\":\"" + deviceName + "\",";
@@ -882,6 +1086,7 @@ void handleAPI_Info() {
     json += "\"mqtt\":\"" + String(mqttEnabled && mqtt.connected() ? "Connected" : "Disconnected") + "\",";
     json += "\"ota\":\"" + String(otaEnabled ? "Enabled" : "Disabled") + "\",";
     json += "\"uptime\":\"" + String(millis() / 1000 / 60) + " min\",";
+    json += "\"time\":\"" + String(timeValid ? currentTimeString() : "not synced") + "\",";
     json += "\"version\":\"" + version + "\"";
     json += "}";
     server.send(200, "application/json", json);
@@ -950,6 +1155,14 @@ void setup() {
     // OTA preferences
     otaEnabled      = prefs.getBool("otaEnabled", false);
     otaPassword     = prefs.getString("otaPass", "");
+    // Clock and shutdown scheduling
+    ntpServer           = prefs.getString("ntpServer", "pool.ntp.org");
+    tzOffsetMin         = prefs.getInt("tzOffsetMin", 180);
+    autoOffMin          = prefs.getUShort("autoOffMin", 180);
+    blackoutEnabled     = prefs.getBool("blackoutEn", true);
+    blackoutMinutes     = prefs.getInt("blackoutMin", 22 * 60);
+    shutdownLeadMin     = prefs.getUShort("shutdownLead", 15);
+    cooldownExpectedMin = prefs.getUShort("cooldownMin", 5);
 
     if(heaterVersion == "V1") {
         if(prefs.getBytes("addrV1", myAddrV1, 3) != 3) {
@@ -995,6 +1208,8 @@ void setup() {
     displayLine4 = heaterPaired ? (heaterVersion + " Paired!") : (heaterVersion + " Not paired");
     updateDisplay();
 
+    setupTime();
+
     if(mqttEnabled) connectMQTT();
 
     // OTA init (after WiFi — works in both AP and STA)
@@ -1012,6 +1227,8 @@ void setup() {
     server.on("/api/factory",      handleAPI_Factory);
     server.on("/api/reboot",       handleAPI_Reboot);
     // OTA endpoints
+    server.on("/api/timers",       handleAPI_Timers);
+    server.on("/api/timers/status",handleAPI_TimerStatus);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
     server.on("/api/ota/config",   handleAPI_OTAConfig);
     server.begin();
@@ -1039,6 +1256,8 @@ void loop() {
     feedWatchdog();
     yield();
     superviseWiFi();
+    updateTimeSync();
+    updateScheduler();
     server.handleClient();
     // MQTT
     if(mqttEnabled && !mqtt.connected()) {

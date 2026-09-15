@@ -1,0 +1,85 @@
+/*
+ * Shutdown scheduling — pure logic with no hardware access.
+ *
+ * Two independent mechanisms decide when the heater must be stopped,
+ * whichever comes first:
+ *
+ *   1. A runtime limit, protecting against "switched it on and forgot".
+ *   2. An absolute deadline before the mains power is cut.
+ *
+ * The second one is the reason this module exists at all. Cutting power to a
+ * running diesel heater skips the purge cycle: unburnt fuel stays in the
+ * chamber and the heat exchanger cools with no airflow. Done nightly, that
+ * cokes up the burner. So the heater has to be stopped early enough for the
+ * purge to finish before the power goes.
+ *
+ * Everything here is a pure function of its input, so it builds on the host
+ * and is covered by `pio test -e native`. Reproducing "21:45 with unsynced
+ * time" on real hardware is awkward, and this code switches off a heater.
+ */
+
+#pragma once
+
+#include <stdint.h>
+
+// Extra slack on top of the expected purge duration before the controller
+// decides something went wrong and raises an alarm.
+#define SCHED_COOLDOWN_MARGIN_MIN 3
+
+#define MINUTES_PER_DAY 1440
+
+enum SchedulerAction {
+    SCHED_NONE = 0,          // nothing to do
+    SCHED_SHUT_DOWN,         // send the off command now
+    SCHED_COOLDOWN_DONE,     // heater reached OFF after a scheduled shutdown
+    SCHED_COOLDOWN_TIMEOUT,  // it failed to reach OFF in the expected time
+};
+
+enum SchedulerReason {
+    REASON_NONE = 0,
+    REASON_RUNTIME_LIMIT,    // the heater has been running for too long
+    REASON_BLACKOUT,         // mains power is about to be cut
+};
+
+struct SchedulerDecision {
+    SchedulerAction action;
+    SchedulerReason reason;
+};
+
+struct SchedulerInput {
+    // -- Heater --
+    uint8_t  heaterState;         // STATE_* from protocol.h
+    bool     heaterPaired;
+
+    // -- Monotonic clock (millis) --
+    uint32_t nowMs;
+    uint32_t heaterOnSinceMs;     // when the heater last left OFF
+    bool     heaterOnSinceValid;
+
+    // -- Wall clock --
+    bool     timeValid;           // false until NTP has synced
+    int      nowMinutes;          // minutes since local midnight
+
+    // -- Shutdown in progress --
+    bool     shutdownRequested;
+    uint32_t shutdownAtMs;        // when the off command was sent
+
+    // -- Settings --
+    uint16_t autoOffMin;          // runtime limit, 0 = disabled
+    bool     blackoutEnabled;
+    int      blackoutMinutes;     // when mains power is cut
+    uint16_t shutdownLeadMin;     // how early to stop before that
+    uint16_t cooldownExpectedMin; // how long the purge normally takes
+};
+
+// True when the heater is off or already on its way there: shutdown ordered,
+// burner out, fan purging. The protocol only offers a power toggle, so a
+// command sent in any of these states would start the heater back up.
+bool heaterIsOffOrStopping(uint8_t state);
+
+// True if `now` falls inside [start, end) on a 24-hour circle. The window may
+// wrap past midnight, which it does whenever the lead time pushes the
+// shutdown into the previous day.
+bool inDayWindow(int now, int start, int end);
+
+SchedulerDecision decideShutdown(const SchedulerInput& in);

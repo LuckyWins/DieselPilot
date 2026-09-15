@@ -443,6 +443,7 @@
             <div class="tab active" onclick="switchTab('pairing',this)">🔗 Pairing</div>
             <div class="tab" onclick="switchTab('wifi',this)">📡 WiFi</div>
             <div class="tab" onclick="switchTab('mqtt',this)">📨 MQTT</div>
+            <div class="tab" onclick="switchTab('timers',this)">⏱ Timers</div>
             <div class="tab" onclick="switchTab('ota',this)">⬆ OTA</div>
             <div class="tab" onclick="switchTab('system',this)">⚙️ System</div>
         </div>
@@ -497,6 +498,53 @@
                 </div>
                 <button onclick="saveMQTT()">💾 SAVE MQTT</button>
                 <div class="info">Blank fields keep their saved value. Clear the broker address with <strong>__CLEAR__</strong> to disable MQTT.</div>
+            </div>
+        </div>
+
+        <!-- ⏱ TIMERS TAB -->
+        <div id="timers" class="tab-content">
+            <div class="glass-card">
+                <h2>⏱ Shutdown Timers</h2>
+
+                <div class="info">
+                    Device clock: <strong id="tmNow">--:--</strong>
+                    <span id="tmSync"></span>
+                </div>
+
+                <h2 style="font-size:1rem; margin-top:16px;">Runtime limit</h2>
+                <input type="number" id="tmAutoOff" min="0" max="1440"
+                       placeholder="Auto-off after N minutes (0 = disabled)">
+
+                <h2 style="font-size:1rem; margin-top:16px;">Scheduled power cut</h2>
+                <div class="toggle-row">
+                    <span>Shut down before the mains cut</span>
+                    <label class="switch">
+                        <input type="checkbox" id="tmBlackoutEn">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="form-row">
+                    <input type="time" id="tmBlackoutAt" title="When mains power is cut">
+                    <input type="number" id="tmLead" min="1" max="240"
+                           placeholder="Stop N min earlier">
+                </div>
+                <input type="number" id="tmCooldown" min="1" max="60"
+                       placeholder="Expected purge duration, minutes">
+                <div class="info">
+                    Cutting power to a running heater skips the purge cycle, which
+                    cokes up the burner over time. The controller stops it early so
+                    the fan can finish. Needs a synced clock — without one only the
+                    runtime limit applies.
+                </div>
+
+                <h2 style="font-size:1rem; margin-top:16px;">Clock</h2>
+                <div class="form-row">
+                    <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
+                    <input type="number" id="tmTz" min="-720" max="840"
+                           placeholder="UTC offset, min (180 = UTC+3)">
+                </div>
+
+                <button onclick="saveTimers()">💾 SAVE TIMERS</button>
             </div>
         </div>
 
@@ -575,6 +623,10 @@
                         <div class="status-value" style="font-size:1rem;" id="otaInfoStatus">--</div>
                     </div>
                     <div class="status-item">
+                        <div class="status-label">Time</div>
+                        <div class="status-value" style="font-size:1rem;" id="sysTime">--</div>
+                    </div>
+                    <div class="status-item">
                         <div class="status-label">Uptime</div>
                         <div class="status-value" style="font-size:1rem;" id="uptime">--</div>
                     </div>
@@ -603,12 +655,53 @@
         if(e.target === this) toggleSettings();
     });
 
+    // ── TIMERS ────────────────────────────────────────────────────
+    const toHHMM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' +
+                        String(m % 60).padStart(2, '0');
+
+    function updateTimersUI() {
+        fetch('/api/timers/status')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('tmNow').textContent   = d.now;
+                document.getElementById('tmSync').textContent  =
+                    d.timeValid ? '' : ' — not synced, deadline inactive';
+                document.getElementById('tmAutoOff').value     = d.autoOff;
+                document.getElementById('tmBlackoutEn').checked = d.blackoutEn;
+                document.getElementById('tmBlackoutAt').value  = toHHMM(d.blackout);
+                document.getElementById('tmLead').value        = d.lead;
+                document.getElementById('tmCooldown').value    = d.cooldown;
+                document.getElementById('tmNtp').value         = d.ntpServer;
+                document.getElementById('tmTz').value          = d.tzOffset;
+            })
+            .catch(() => {
+                document.getElementById('tmNow').textContent = 'unreachable';
+            });
+    }
+
+    function saveTimers() {
+        const [h, m] = document.getElementById('tmBlackoutAt').value.split(':');
+        const q = new URLSearchParams({
+            autoOff:    document.getElementById('tmAutoOff').value,
+            blackoutEn: document.getElementById('tmBlackoutEn').checked ? '1' : '0',
+            blackout:   (Number(h) * 60 + Number(m)) || 0,
+            lead:       document.getElementById('tmLead').value,
+            cooldown:   document.getElementById('tmCooldown').value,
+            ntpServer:  document.getElementById('tmNtp').value,
+            tzOffset:   document.getElementById('tmTz').value
+        });
+        fetch('/api/timers?' + q)
+            .then(r => r.text()).then(msg => { alert(msg); updateTimersUI(); })
+            .catch(() => alert('Device unreachable'));
+    }
+
     function switchTab(tab, el) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         if(el) el.classList.add('active');
         document.getElementById(tab).classList.add('active');
-        if(tab === 'ota') updateOtaUI();
+        if(tab === 'ota')    updateOtaUI();
+        if(tab === 'timers') updateTimersUI();
     }
 
     // ── FORM HELPERS ──────────────────────────────────────────────
@@ -733,6 +826,7 @@
                 document.getElementById('mqttStatus').textContent    = data.mqtt;
                 document.getElementById('otaInfoStatus').textContent  = data.ota;
                 document.getElementById('uptime').textContent        = data.uptime;
+                document.getElementById('sysTime').textContent       = data.time;
                 document.getElementById('fwVersion').textContent     = data.version;
                 // Keep the header pill live, but DON'T touch the OTA toggle here.
                 setOtaPill(data.ota === 'Enabled');
