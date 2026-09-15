@@ -72,6 +72,40 @@ void test_crc_detects_single_bit_flip(void) {
     TEST_ASSERT_NOT_EQUAL(good, crc16_modbus(frame, sizeof(frame)));
 }
 
+// -- Signal strength --──────────────────────────────────────────────────────
+
+// The raw byte is two's complement, so the sign flips at 128. Getting that
+// boundary wrong silently halves the reported range.
+void test_rssi_positive_half(void) {
+    TEST_ASSERT_EQUAL_INT(-74, rssiFromRaw(0));
+    TEST_ASSERT_EQUAL_INT(-24, rssiFromRaw(100));
+    TEST_ASSERT_EQUAL_INT(-11, rssiFromRaw(127));
+}
+
+void test_rssi_negative_half(void) {
+    TEST_ASSERT_EQUAL_INT(-138, rssiFromRaw(128));
+    TEST_ASSERT_EQUAL_INT(-102, rssiFromRaw(200));
+}
+
+// 128 is the first negative value and must not be read as the largest
+// positive one.
+void test_rssi_sign_boundary(void) {
+    TEST_ASSERT_TRUE(rssiFromRaw(128) < rssiFromRaw(127));
+}
+
+// Integer division truncates toward zero, so 255 lands on -74 rather than
+// -75. Pinned because it is what the firmware has always reported.
+void test_rssi_truncation_at_the_top(void) {
+    TEST_ASSERT_EQUAL_INT(-74, rssiFromRaw(255));
+}
+
+void test_rssi_stays_in_a_plausible_range(void) {
+    for(int raw = 0; raw <= 255; raw++) {
+        int dbm = rssiFromRaw((uint8_t)raw);
+        TEST_ASSERT_TRUE(dbm >= -138 && dbm <= -11);
+    }
+}
+
 // -- Decoders --────────────────────────────────────────────────────────────
 
 void test_state_names(void) {
@@ -106,6 +140,12 @@ int main(int, char**) {
     RUN_TEST(test_crc_reference_vector);
     RUN_TEST(test_crc_empty_is_initial_value);
     RUN_TEST(test_crc_detects_single_bit_flip);
+
+    RUN_TEST(test_rssi_positive_half);
+    RUN_TEST(test_rssi_negative_half);
+    RUN_TEST(test_rssi_sign_boundary);
+    RUN_TEST(test_rssi_truncation_at_the_top);
+    RUN_TEST(test_rssi_stays_in_a_plausible_range);
 
     RUN_TEST(test_state_names);
     RUN_TEST(test_error_names);

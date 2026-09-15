@@ -58,6 +58,18 @@ uint32_t freqToRegisters(uint32_t freqHz);
 uint32_t registersToFreq(uint32_t regs);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL STRENGTH
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Offset for the 433 MHz band, per the CC1101 datasheet.
+#define CC1101_RSSI_OFFSET_DB 74
+
+// Converts a raw CC1101 RSSI byte into dBm. The value is two's complement:
+// anything from 128 up is negative. Used both for the byte the radio appends
+// to a received frame and for the RSSI status register.
+int rssiFromRaw(uint8_t raw);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CRC-16/MODBUS
 // ═══════════════════════════════════════════════════════════════════════════
 

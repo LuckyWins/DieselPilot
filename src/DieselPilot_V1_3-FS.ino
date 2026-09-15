@@ -458,7 +458,10 @@ void decodePacket_V1(byte* data) {
             heaterStatus.setpoint = 0;
         } else {
             heaterStatus.autoMode = true;
-            heaterStatus.setpoint = (b7 - 32) * 2 + (b8 >> 7);
+            // The frame comes off the air, so a corrupt b7 can push this
+            // far outside what an int8_t holds.
+            int sp = (b7 - 32) * 2 + (b8 >> 7);
+            heaterStatus.setpoint = (int8_t)constrain(sp, -128, 127);
             heaterStatus.power = 0;
         }
         heaterStatus.ambientTemp = (b8 & 0x0F) + 10;
@@ -479,6 +482,10 @@ void updateHeaterStatus_V1() {
             byte buf[10];
             for(int i = 0; i < 10; i++) buf[i] = cc1101_readReg(0xBF);
             decodePacket_V1(buf);
+            // V1 frames are read as a fixed 10 bytes, so there is no appended
+            // status byte to take the signal level from. The radio keeps the
+            // last measurement in its RSSI status register instead.
+            heaterStatus.rssi = rssiFromRaw(cc1101_readReg(0xF4));
             addErrorToHistory(heaterStatus.errorCode);
             rxFlushV1(); rxEnableV1();
         }
@@ -544,7 +551,7 @@ void sendCommand(uint8_t cmd) {
 void rxFlush() { cc1101_strobe(0x36); cc1101_readReg(0xBF); cc1101_strobe(0x3A); delay(16); }
 void rxEnable() { cc1101_strobe(0x34); }
 
-bool receivePacket(uint8_t* bytes, uint16_t timeout) {
+bool receivePacket(uint8_t* bytes, uint16_t timeout, uint8_t* outLen) {
     unsigned long t = millis();
     uint8_t rxLen;
     rxFlush(); rxEnable();
@@ -564,6 +571,7 @@ bool receivePacket(uint8_t* bytes, uint16_t timeout) {
     }
     for(int i = 0; i < rxLen; i++) bytes[i] = cc1101_readReg(0xBF);
     rxFlush();
+    if(outLen) *outLen = rxLen;
     uint16_t crc = crc16_modbus(bytes, 21);
     uint16_t rxCrc = (bytes[21] << 8) | bytes[22];
     return (crc == rxCrc);
@@ -577,12 +585,15 @@ void updateHeaterStatus() {
     if(!heaterPaired) return;
     sendCommand(CMD_WAKEUP);
     uint8_t buf[32];
-    if(receivePacket(buf, 2000)) {
+    uint8_t rxLen = 0;
+    if(receivePacket(buf, 2000, &rxLen)) {
         uint32_t addr = ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
                         ((uint32_t)buf[4] << 8) | buf[5];
         if(addr == heaterAddress) {
             heaterStatus.state = buf[6];
-            heaterStatus.power = buf[7];
+            // BYTE[7] is the error code. It used to be copied into .power as
+            // well, but nothing reads that for V2 -- only the V1 decoder
+            // fills it meaningfully.
             heaterStatus.errorCode = buf[7];
             heaterStatus.voltage = buf[9];
             heaterStatus.ambientTemp = (int8_t)buf[10];
@@ -590,7 +601,11 @@ void updateHeaterStatus() {
             heaterStatus.setpoint = (int8_t)buf[13];
             heaterStatus.autoMode = (buf[14] == 0x32);
             heaterStatus.pumpFreq = buf[15];
-            heaterStatus.rssi = (buf[23] - (buf[23] >= 128 ? 256 : 0)) / 2 - 74;
+            // The radio appends RSSI and LQI to the frame, but only when it
+            // was long enough to carry them: a 23-byte frame ends at index 22
+            // and buf[23] would be uninitialised stack. Keep the previous
+            // reading rather than report noise.
+            if(rxLen >= 24) heaterStatus.rssi = rssiFromRaw(buf[23]);
             heaterStatus.lastUpdate = millis();
             addErrorToHistory(heaterStatus.errorCode);
             if(mqttEnabled && mqtt.connected()) publishMQTT();
@@ -602,7 +617,8 @@ uint32_t findHeater(uint16_t timeout) {
     Serial.println("Searching for heater...");
     displayLine2 = "Pairing..."; updateDisplay();
     uint8_t buf[32];
-    if(receivePacket(buf, timeout)) {
+    uint8_t rxLen = 0;
+    if(receivePacket(buf, timeout, &rxLen)) {
         return ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
                ((uint32_t)buf[4] << 8) | buf[5];
     }
@@ -623,7 +639,8 @@ void updatePairing() {
     }
 
     uint8_t buf[32];
-    if(!receivePacket(buf, PAIR_SLICE_MS)) return;
+    uint8_t rxLen = 0;
+    if(!receivePacket(buf, PAIR_SLICE_MS, &rxLen)) return;
 
     uint32_t addr = ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
                     ((uint32_t)buf[4] << 8) | buf[5];
