@@ -1,5 +1,5 @@
 /*
- * Тесты чистой логики протокола: расчёт частоты, CRC, декодеры.
+ * Tests for the pure protocol logic: frequency maths, CRC, decoders.
  */
 
 #include <unity.h>
@@ -9,12 +9,12 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-// ── Частота ────────────────────────────────────────────────────────────────
+// -- Frequency -─────────────────────────────────────────────────────────────
 
-// Шаг перестройки: 26 МГц / 2^16. Точнее этого попасть невозможно.
+// Tuning step: 26 MHz / 2^16. Nothing can be targeted more precisely.
 static const uint32_t FREQ_STEP_HZ = 397;
 
-// Набор регистров V2 из cc1101_init(): FREQ2=0x10, FREQ1=0xB0, FREQ0=0x9C.
+// V2 register set from cc1101_init(): FREQ2=0x10, FREQ1=0xB0, FREQ0=0x9C.
 void test_v2_registers_match_declared_frequency(void) {
     TEST_ASSERT_EQUAL_HEX32(0x10B09C, freqToRegisters(433937000UL));
 }
@@ -24,16 +24,16 @@ void test_v2_registers_decode_back(void) {
     TEST_ASSERT_UINT32_WITHIN(FREQ_STEP_HZ, 433937000UL, hz);
 }
 
-// Набор регистров V1 из cc1101_init_V1(): FREQ2=0x10, FREQ1=0xB0, FREQ0=0x71.
+// V1 register set from cc1101_init_V1(): FREQ2=0x10, FREQ1=0xB0, FREQ0=0x71.
 //
-// В коде и в выпадающем списке веб-морды подписано «433.892 MHz», но регистры
-// дают ~433.920. Тест фиксирует реальное поведение железа, чтобы подпись
-// исправлялась под него, а не наоборот.
+// Both the code and the web GUI dropdown label this "433.892 MHz", but the
+// registers yield ~433.920. This test pins down the real hardware behaviour
+// so that the label gets corrected to match it, not the other way round.
 void test_v1_registers_are_not_the_documented_frequency(void) {
     uint32_t hz = registersToFreq(0x10B071);
 
     TEST_ASSERT_UINT32_WITHIN(1000UL, 433920000UL, hz);
-    TEST_ASSERT_TRUE(hz > 433900000UL);   // подпись «433.892» не соответствует
+    TEST_ASSERT_TRUE(hz > 433900000UL);   // the "433.892" label does not match
 }
 
 void test_frequency_roundtrip_is_stable(void) {
@@ -45,16 +45,16 @@ void test_frequency_roundtrip_is_stable(void) {
     }
 }
 
-// Произведение freqHz * 65536 вылезает за 32 бита — проверяем,
-// что промежуточные вычисления не переполняются.
+// The freqHz * 65536 product exceeds 32 bits — make sure the intermediate
+// arithmetic does not overflow.
 void test_frequency_does_not_overflow_32bit(void) {
     TEST_ASSERT_EQUAL_HEX32(0x10B09C, freqToRegisters(433937000UL));
     TEST_ASSERT_TRUE(freqToRegisters(928000000UL) > freqToRegisters(433937000UL));
 }
 
-// ── CRC-16/MODBUS ──────────────────────────────────────────────────────────
+// -- CRC-16/MODBUS --────────────────────────────────────────────────────────
 
-// Эталонный вектор стандарта: "123456789" -> 0x4B37.
+// Standard check vector: "123456789" -> 0x4B37.
 void test_crc_reference_vector(void) {
     const uint8_t data[] = "123456789";
     TEST_ASSERT_EQUAL_HEX16(0x4B37, crc16_modbus(data, 9));
@@ -72,7 +72,7 @@ void test_crc_detects_single_bit_flip(void) {
     TEST_ASSERT_NOT_EQUAL(good, crc16_modbus(frame, sizeof(frame)));
 }
 
-// ── Декодеры ───────────────────────────────────────────────────────────────
+// -- Decoders --────────────────────────────────────────────────────────────
 
 void test_state_names(void) {
     TEST_ASSERT_EQUAL_STRING("OFF",     getStateName(STATE_OFF));
@@ -87,8 +87,8 @@ void test_error_names(void) {
     TEST_ASSERT_EQUAL_STRING("UNKNOWN",  getErrorName(0xFE));
 }
 
-// Коды 0x00 и 0x01 оба означают штатную работу — на это опирается
-// подавление уведомлений, поэтому фиксируем тестом.
+// Codes 0x00 and 0x01 both mean normal operation. Notification
+// suppression relies on that, so pin it down with a test.
 void test_error_none_and_on_are_both_normal(void) {
     TEST_ASSERT_EQUAL_STRING("NORMAL", getErrorName(ERR_NONE));
     TEST_ASSERT_EQUAL_STRING("NORMAL", getErrorName(ERR_ON));

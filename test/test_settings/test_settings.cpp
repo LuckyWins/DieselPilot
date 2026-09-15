@@ -1,9 +1,9 @@
 /*
- * Тесты разбора форм настроек.
+ * Settings form parsing tests.
  *
- * Главное здесь — регрессия, из-за которой сохранение формы с пустыми
- * полями стирало SSID и пароль Wi-Fi. После перезагрузки устройство
- * уходило в AP-режим, и в удалённом гараже это означало поездку.
+ * The important one here is the regression where saving a form with blank
+ * fields wiped the Wi-Fi SSID and password. After a reboot the device fell
+ * back to AP mode, which in a remote garage meant a trip out there.
  */
 
 #include <unity.h>
@@ -12,7 +12,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-// ── resolveField ───────────────────────────────────────────────────────────
+// -- resolveField ---────────────────────────────────────────────────────────
 
 void test_field_absent_keeps_current(void) {
     TEST_ASSERT_EQUAL_STRING("MyWiFi",
@@ -39,15 +39,15 @@ void test_field_clear_token_on_empty_stays_empty(void) {
         resolveField(true, SETTINGS_CLEAR_TOKEN, "").c_str());
 }
 
-// Значение, похожее на маркер, но не совпадающее с ним, должно записаться
-// как обычный текст — иначе пароль вида "__CLEAR__x" повёл бы себя странно.
+// A value that resembles the marker but does not match it must be stored
+// as plain text, otherwise a password like "__CLEAR__x" would misbehave.
 void test_field_clear_token_must_match_exactly(void) {
     TEST_ASSERT_EQUAL_STRING("__CLEAR__x",
         resolveField(true, "__CLEAR__x", "old").c_str());
 }
 
-// Та самая регрессия: в форме заполнен только hostname, поля Wi-Fi пусты.
-// До правки этот сценарий стирал и SSID, и пароль.
+// The regression itself: only the hostname is filled in, Wi-Fi fields are
+// blank. Before the fix this wiped both the SSID and the password.
 void test_regression_saving_hostname_keeps_wifi_credentials(void) {
     std::string ssid = resolveField(true, "",        "HomeNet");
     std::string pass = resolveField(true, "",        "s3cret");
@@ -58,14 +58,14 @@ void test_regression_saving_hostname_keeps_wifi_credentials(void) {
     TEST_ASSERT_EQUAL_STRING("Garage",  host.c_str());
 }
 
-// Выключить MQTT можно только очисткой адреса брокера: mqttEnabled
-// выводится из его длины. Проверяем, что путь к выключению существует.
+// MQTT can only be disabled by clearing the broker address, since
+// mqttEnabled is derived from its length. Check that path still exists.
 void test_regression_mqtt_can_still_be_disabled(void) {
     std::string broker = resolveField(true, SETTINGS_CLEAR_TOKEN, "mqtt.example.com");
     TEST_ASSERT_TRUE(broker.empty());
 }
 
-// ── resolveFlag ────────────────────────────────────────────────────────────
+// -- resolveFlag ----────────────────────────────────────────────────────────
 
 void test_flag_absent_keeps_current(void) {
     TEST_ASSERT_TRUE(resolveFlag(false, "", true));
@@ -81,7 +81,7 @@ void test_flag_parses_one_and_zero(void) {
     TEST_ASSERT_FALSE(resolveFlag(true, "0", true));
 }
 
-// ── resolveNumber ──────────────────────────────────────────────────────────
+// -- resolveNumber --────────────────────────────────────────────────────────
 
 void test_number_absent_keeps_current(void) {
     TEST_ASSERT_EQUAL_INT(1883, resolveNumber(false, "", 1883, 1, 65535));
@@ -96,14 +96,14 @@ void test_number_out_of_range_keeps_current(void) {
     TEST_ASSERT_EQUAL_INT(1883, resolveNumber(true, "0",     1883, 1, 65535));
 }
 
-// Мусор не должен превращаться в ноль, как это делает atoi.
+// Garbage must not turn into zero the way atoi does.
 void test_number_garbage_keeps_current(void) {
     TEST_ASSERT_EQUAL_INT(1883, resolveNumber(true, "abc",  1883, 1, 65535));
     TEST_ASSERT_EQUAL_INT(1883, resolveNumber(true, "88x3", 1883, 1, 65535));
 }
 
-// А вот честный ноль в разрешённом диапазоне принимается —
-// им, например, выключается относительный таймер.
+// A genuine zero inside the allowed range is accepted though —
+// it is how the relative timer gets switched off, for instance.
 void test_number_zero_is_valid_when_in_range(void) {
     TEST_ASSERT_EQUAL_INT(0, resolveNumber(true, "0", 180, 0, 1440));
 }

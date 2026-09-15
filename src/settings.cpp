@@ -23,15 +23,15 @@ long resolveNumber(bool present, const std::string& incoming, long current,
     if(!present)         return current;
     if(incoming.empty()) return current;
 
-    // strtol вместо atoi: нужно отличать "0" от нечислового мусора,
-    // который иначе тоже дал бы ноль.
+    // strtol rather than atoi: we must tell a real "0" apart from
+    // non-numeric garbage, which would otherwise also yield zero.
     errno = 0;
     char* end = nullptr;
     long parsed = std::strtol(incoming.c_str(), &end, 10);
 
-    if(errno != 0)              return current;  // переполнение
-    if(end == incoming.c_str()) return current;  // ни одной цифры
-    if(end != nullptr && *end)  return current;  // хвостовой мусор
+    if(errno != 0)              return current;  // overflow
+    if(end == incoming.c_str()) return current;  // no digits at all
+    if(end != nullptr && *end)  return current;  // trailing garbage
     if(parsed < minValue || parsed > maxValue) return current;
 
     return parsed;

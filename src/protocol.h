@@ -1,8 +1,8 @@
 /*
- * Чистая логика протокола отопителя — без обращений к железу.
+ * Pure heater protocol logic — no hardware access.
  *
- * Всё, что здесь лежит, собирается и на ESP32, и на хосте,
- * поэтому покрывается тестами через `pio test -e native`.
+ * Everything here builds both for the ESP32 and for the host, so it is
+ * covered by tests via `pio test -e native`.
  */
 
 #pragma once
@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 // ═══════════════════════════════════════════════════════════════════════════
-// СОСТОЯНИЯ ОТОПИТЕЛЯ
+// HEATER STATES
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define STATE_OFF            0
@@ -24,7 +24,7 @@
 #define STATE_COOLING        8
 
 // ═══════════════════════════════════════════════════════════════════════════
-// КОДЫ ОШИБОК (BYTE[7])
+// ERROR CODES (BYTE[7])
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define ERR_NONE           0x00
@@ -42,19 +42,19 @@
 #define ERR_STANDBY        0x0C
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ЧАСТОТА CC1101
+// CC1101 FREQUENCY
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Кварц модуля CC1101. Из него считается шаг перестройки частоты:
-// 26 МГц / 2^16 = 396.73 Гц на единицу регистра.
+// CC1101 crystal. It defines the tuning step:
+// 26 MHz / 2^16 = 396.73 Hz per register unit.
 #define CC1101_XTAL_HZ 26000000UL
 
-// Переводит частоту в герцах в 24-битное значение регистров FREQ2/FREQ1/FREQ0.
-// Старший байт результата идёт в 0x0D, средний в 0x0E, младший в 0x0F.
+// Converts a frequency in hertz into the 24-bit FREQ2/FREQ1/FREQ0 value.
+// High byte goes to 0x0D, middle to 0x0E, low to 0x0F.
 uint32_t freqToRegisters(uint32_t freqHz);
 
-// Обратное преобразование — нужно, чтобы показать пользователю,
-// на какую частоту модуль реально настроился после округления.
+// Reverse conversion — needed to show which frequency the module actually
+// settled on after rounding to the tuning step.
 uint32_t registersToFreq(uint32_t regs);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -64,7 +64,7 @@ uint32_t registersToFreq(uint32_t regs);
 uint16_t crc16_modbus(const uint8_t* buf, int len);
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ДЕКОДЕРЫ
+// DECODERS
 // ═══════════════════════════════════════════════════════════════════════════
 
 const char* getStateName(uint8_t state);

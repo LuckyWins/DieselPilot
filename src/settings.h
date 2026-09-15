@@ -1,48 +1,48 @@
 /*
- * Разбор форм настроек — чистая логика без обращений к железу.
+ * Settings form parsing — pure logic with no hardware access.
  *
- * Ядро работает на std::string, чтобы собираться на хосте и покрываться
- * тестами. Для прошивки есть тонкая обёртка над Arduino String.
+ * The core works on std::string so it builds on the host and can be
+ * covered by tests. A thin Arduino String wrapper is provided for firmware.
  */
 
 #pragma once
 
 #include <string>
 
-// Маркер явной очистки поля.
+// Marker for explicitly clearing a field.
 //
-// Пустое значение означает «не менять» — иначе форма, отправленная
-// с незаполненным полем, стирает сохранённую настройку. Именно так
-// правка hostname стирала SSID и пароль, после чего устройство
-// уходило в AP-режим.
+// An empty value means "keep unchanged" — otherwise a form submitted with
+// a blank field wipes the stored setting. That is exactly how editing the
+// hostname used to erase the SSID and password, after which the device
+// fell back to AP mode.
 //
-// Но полностью запретить очистку нельзя: mqttEnabled выводится из длины
-// адреса брокера, то есть без сброса поля MQTT стало бы невозможно
-// выключить. Отсюда отдельный маркер.
+// Clearing cannot simply be forbidden: mqttEnabled is derived from the
+// length of the broker address, so without a reset there would be no way
+// to turn MQTT off. Hence a dedicated marker.
 #define SETTINGS_CLEAR_TOKEN "__CLEAR__"
 
-// Решает, каким станет поле настроек после отправки формы:
-//   параметра нет в запросе  -> оставить текущее значение
-//   параметр пустой          -> оставить текущее значение
-//   параметр == CLEAR_TOKEN  -> очистить
-//   иначе                    -> принять новое значение
+// Decides what a settings field becomes after a form submission:
+//   parameter missing        -> keep the current value
+//   parameter empty          -> keep the current value
+//   parameter == CLEAR_TOKEN -> clear it
+//   otherwise                -> accept the new value
 std::string resolveField(bool present,
                          const std::string& incoming,
                          const std::string& current);
 
-// Чекбоксы приходят строкой "1"/"0". Отсутствие параметра не должно
-// молча выключать опцию, поэтому текущее значение сохраняется.
+// Checkboxes arrive as "1"/"0". A missing parameter must not silently
+// switch the option off, so the current value is preserved.
 bool resolveFlag(bool present, const std::string& incoming, bool current);
 
-// Числовые поля: непустое и корректное значение из диапазона принимается,
-// всё остальное оставляет текущее.
+// Numeric fields: a non-empty, well-formed value inside the allowed range
+// is accepted, anything else keeps the current one.
 long resolveNumber(bool present, const std::string& incoming, long current,
                    long minValue, long maxValue);
 
 #ifdef ARDUINO
 #include <Arduino.h>
 
-// Обёртки для вызова из прошивки — вся логика остаётся в функциях выше.
+// Wrappers for firmware calls — all logic stays in the functions above.
 inline String resolveField(bool present, const String& incoming, const String& current) {
     return String(resolveField(present,
                                std::string(incoming.c_str()),
