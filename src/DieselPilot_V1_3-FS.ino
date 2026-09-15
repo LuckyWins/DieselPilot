@@ -36,9 +36,10 @@
 #include <U8g2lib.h>
 #include <LittleFS.h>
 #include <ArduinoOTA.h>          // OTA firmware updates (espota protocol)
+#include <esp_task_wdt.h>        // Hardware watchdog
 
-#include "protocol.h"           // Состояния, коды ошибок, CRC, расчёт частоты
-#include "settings.h"           // Разбор форм настроек
+#include "protocol.h"           // States, error codes, CRC, frequency maths
+#include "settings.h"           // Settings form parsing
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HARDWARE CONFIG
@@ -57,6 +58,19 @@
 
 // OLED Configuration
 #define USE_OLED  true
+
+// Watchdog. Generous timeout on purpose: connectivity at the garage is poor,
+// a TLS handshake may legitimately take several seconds and connectMQTT()
+// blocks for up to 4 s. The watchdog must catch hangs, not a slow network.
+#define WDT_TIMEOUT_SEC 60
+
+// How long to wait for CC1101 readiness after pulling CS low. Normally the
+// module answers within microseconds (crystal startup is ~150 us), so 10 ms
+// is more than enough while still preventing an endless hang.
+#define CC1101_READY_TIMEOUT_US 10000
+
+// Retry period for re-initialising the CC1101 after a fault
+#define CC1101_RETRY_MS 30000
 
 // Commands
 #define CMD_WAKEUP 0x23
@@ -83,8 +97,8 @@ const unsigned long menuIntervalV1 = 3500;
 const unsigned long commandLockTimeV1 = 5000;
 unsigned long lastCommandTimeV1 = 0;
 byte myAddrV1[3] = {0x19, 0x52, 0x4B};
-// SSD1315 программно совместим с SSD1306. У SH1106 буфер 132 px
-// с офсетом 2, поэтому его драйвер давал бы сдвиг картинки.
+// The SSD1315 is software compatible with the SSD1306. The SH1106 has a
+// 132 px buffer with an offset of 2, so its driver would shift the image.
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -109,6 +123,9 @@ String mqttUser = "";
 String mqttPassword = "";
 bool mqttAuthEnabled = false;
 bool mqttEnabled = false;
+
+// CC1101: module does not answer over SPI (broken wiring, no power)
+bool cc1101Fault = false;
 
 // Heater
 uint32_t heaterAddress = 0x00000000;
@@ -159,7 +176,7 @@ String otaPassword = "";                // Password required to flash (saved in 
 bool   otaRunning  = false;             // ArduinoOTA.begin() has been called
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ИСТОРИЯ ОШИБОК
+// ERROR HISTORY
 // ═══════════════════════════════════════════════════════════════════════════
 
 void addErrorToHistory(uint8_t errorCode) {
@@ -171,12 +188,45 @@ void addErrorToHistory(uint8_t errorCode) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WATCHDOG
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Tell the watchdog the loop is alive. Called not only from loop() but also
+// inside long yet legitimate waits — such as the heater search during
+// pairing, which runs for up to 60 seconds.
+inline void feedWatchdog() {
+    esp_task_wdt_reset();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CC1101 LOW-LEVEL FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// The module signals readiness by pulling MISO low after CS is asserted.
+//
+// This wait must be bounded: without a limit, broken wiring or an unpowered
+// module hangs the controller for good — and it happens inside setup(), in
+// cc1101_init(), which the watchdog cannot cover because it is armed last.
+//
+// Returns false and releases CS if the module did not answer. Protocol
+// semantics for a healthy module are unchanged: the loop still exits on
+// exactly the same condition as before.
+static bool cc1101_waitReady() {
+    uint32_t t0 = micros();
+    while(digitalRead(PIN_MISO)) {
+        if(micros() - t0 > CC1101_READY_TIMEOUT_US) {
+            digitalWrite(PIN_SS, HIGH);
+            cc1101Fault = true;
+            return false;
+        }
+    }
+    cc1101Fault = false;
+    return true;
+}
+
 void cc1101_writeReg(uint8_t addr, uint8_t val) {
     digitalWrite(PIN_SS, LOW);
-    while(digitalRead(PIN_MISO));
+    if(!cc1101_waitReady()) return;
     SPI.transfer(addr);
     SPI.transfer(val);
     digitalWrite(PIN_SS, HIGH);
@@ -184,7 +234,7 @@ void cc1101_writeReg(uint8_t addr, uint8_t val) {
 
 void cc1101_writeBurst(uint8_t addr, uint8_t len, uint8_t* bytes) {
     digitalWrite(PIN_SS, LOW);
-    while(digitalRead(PIN_MISO));
+    if(!cc1101_waitReady()) return;
     SPI.transfer(addr);
     for(int i = 0; i < len; i++) SPI.transfer(bytes[i]);
     digitalWrite(PIN_SS, HIGH);
@@ -192,18 +242,35 @@ void cc1101_writeBurst(uint8_t addr, uint8_t len, uint8_t* bytes) {
 
 void cc1101_strobe(uint8_t addr) {
     digitalWrite(PIN_SS, LOW);
-    while(digitalRead(PIN_MISO));
+    if(!cc1101_waitReady()) return;
     SPI.transfer(addr);
     digitalWrite(PIN_SS, HIGH);
 }
 
 uint8_t cc1101_readReg(uint8_t addr) {
     digitalWrite(PIN_SS, LOW);
-    while(digitalRead(PIN_MISO));
+    if(!cc1101_waitReady()) return 0;
     SPI.transfer(addr);
     uint8_t val = SPI.transfer(0xFF);
     digitalWrite(PIN_SS, HIGH);
     return val;
+}
+
+// Presence check via the VERSION register.
+//
+// The readiness wait alone is not enough: it only catches the case where
+// MISO is stuck high. With broken wiring the floating input may read as
+// zeros instead, in which case every operation formally succeeds while the
+// data is garbage. Reading a known register rules out both cases.
+static bool cc1101_selfTest() {
+    uint8_t version = cc1101_readReg(0xF1);   // VERSION, status register address
+    if(version == 0x00 || version == 0xFF) {
+        cc1101Fault = true;
+        Serial.printf("❌ CC1101 self-test failed: VERSION=0x%02X\n", version);
+        return false;
+    }
+    Serial.printf("✅ CC1101 present: VERSION=0x%02X\n", version);
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -252,13 +319,20 @@ void cc1101_init_V1() {
     Serial.println("✅ CC1101 initialized @ 433.892 MHz (V1)");
 }
 
+void cc1101_applyConfig() {
+    if(customFrequency > 0) { cc1101_init(); cc1101_setFrequency(customFrequency); }
+    else if(heaterVersion == "V1") cc1101_init_V1();
+    else cc1101_init();
+    cc1101_selfTest();
+}
+
 void cc1101_setFrequency(uint32_t freqHz) {
     uint32_t freq = freqToRegisters(freqHz);
     cc1101_writeReg(0x0D, (freq >> 16) & 0xFF);
     cc1101_writeReg(0x0E, (freq >> 8) & 0xFF);
     cc1101_writeReg(0x0F, freq & 0xFF);
-    // Показываем частоту после округления до шага перестройки (~397 Гц),
-    // а не запрошенную — модуль настроился именно на неё.
+    // Report the frequency after rounding to the tuning step (~397 Hz)
+    // rather than the requested one — that is what the module tuned to.
     Serial.printf("✅ CC1101 custom frequency set: %u Hz\n", registersToFreq(freq));
 }
 
@@ -401,9 +475,14 @@ bool receivePacket(uint8_t* bytes, uint16_t timeout) {
     uint8_t rxLen;
     rxFlush(); rxEnable();
     while(1) {
-        yield();
+        yield(); feedWatchdog();
         if(millis() - t > timeout) return false;
-        while(!digitalRead(PIN_GDO2)) { yield(); if(millis() - t > timeout) return false; }
+        // Pairing listens on air for up to 60 seconds. That is a legitimate
+        // wait rather than a hang, so feed the watchdog here as well.
+        while(!digitalRead(PIN_GDO2)) {
+            yield(); feedWatchdog();
+            if(millis() - t > timeout) return false;
+        }
         delay(5);
         rxLen = cc1101_readReg(0xFB);
         if(rxLen >= 23 && rxLen <= 26) break;
@@ -585,11 +664,12 @@ void handleRoot() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// РАЗБОР ФОРМ НАСТРОЕК
+// SETTINGS FORM PARSING
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Обёртки над server.arg(). Вся логика — в settings.cpp, чтобы покрывалась
-// тестами: именно здесь жил баг, стиравший учётные данные Wi-Fi.
+// Wrappers around server.arg(). All logic lives in settings.cpp so it can be
+// covered by tests: this is exactly where the bug that erased the Wi-Fi
+// credentials used to live.
 
 static String formField(const char* name, const String& current) {
     return resolveField(server.hasArg(name), server.arg(name), current);
@@ -666,9 +746,7 @@ void handleAPI_PairAuto() {
         heaterVersion = ver; customFrequency = newCustomFreq;
         prefs.putString("heaterVer", heaterVersion);
         prefs.putULong("customFreq", customFrequency);
-        if(customFrequency > 0) { cc1101_init(); cc1101_setFrequency(customFrequency); }
-        else if(heaterVersion == "V1") cc1101_init_V1();
-        else cc1101_init();
+        cc1101_applyConfig();
     }
 
     if(heaterVersion == "V1") {
@@ -700,9 +778,7 @@ void handleAPI_PairManual() {
         heaterVersion = ver; customFrequency = newCustomFreq;
         prefs.putString("heaterVer", heaterVersion);
         prefs.putULong("customFreq", customFrequency);
-        if(customFrequency > 0) { cc1101_init(); cc1101_setFrequency(customFrequency); }
-        else if(heaterVersion == "V1") cc1101_init_V1();
-        else cc1101_init();
+        cc1101_applyConfig();
     }
 
     if(heaterVersion == "V1") {
@@ -737,8 +813,8 @@ void handleAPI_MQTT() {
     mqttAuthEnabled = formFlag("authEnabled", mqttAuthEnabled);
     mqttUser        = formField("user", mqttUser);
     mqttPassword    = formField("pass", mqttPassword);
-    // MQTT включён, пока задан адрес брокера. Выключается очисткой
-    // этого поля маркером __CLEAR__ — другого пути нет.
+    // MQTT stays enabled while a broker address is set. It is switched off
+    // by clearing that field with __CLEAR__ — there is no other way.
     mqttEnabled     = (mqttServer.length() > 0);
     prefs.putString("mqttServer", mqttServer); prefs.putInt("mqttPort", mqttPort);
     prefs.putString("mqttTopic", mqttTopic); prefs.putBool("mqttAuthEn", mqttAuthEnabled);
@@ -836,9 +912,7 @@ void setup() {
     pinMode(PIN_MISO, INPUT); pinMode(PIN_SS, OUTPUT); pinMode(PIN_GDO2, INPUT);
     SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_SS);
 
-    if(customFrequency > 0) { cc1101_init(); cc1101_setFrequency(customFrequency); }
-    else if(heaterVersion == "V1") cc1101_init_V1();
-    else cc1101_init();
+    cc1101_applyConfig();
 
     WiFi.setHostname(deviceName.c_str());
 
@@ -890,6 +964,14 @@ void setup() {
     server.on("/api/ota/config",   handleAPI_OTAConfig);
     server.begin();
 
+    // Arm the watchdog last: the code above contains legitimate delays —
+    // a 2 s splash screen and up to 10 s of Wi-Fi association.
+    if(esp_task_wdt_init(WDT_TIMEOUT_SEC, true) == ESP_OK && esp_task_wdt_add(NULL) == ESP_OK) {
+        Serial.printf("✅ Watchdog armed: %d s\n", WDT_TIMEOUT_SEC);
+    } else {
+        Serial.println("⚠️ Watchdog init failed");
+    }
+
     Serial.println("\n✅ Ready! V" + version);
 }
 
@@ -900,7 +982,9 @@ void setup() {
 void loop() {
     static unsigned long lastHeaterUpdate = 0;
     static unsigned long lastDisplayUpdate = 0;
+    static unsigned long lastCC1101Retry = 0;
 
+    feedWatchdog();
     yield();
     server.handleClient();
     // MQTT
@@ -915,8 +999,16 @@ void loop() {
     // OTA
     loopOTA();
 
-    // Heater status update
-    if(millis() - lastHeaterUpdate > 3000 && heaterPaired) {
+    // Do not poll a faulty module: every operation would hit the timeout and
+    // eat up the loop. Instead retry initialisation every half minute —
+    // the wiring may have been fixed in the meantime.
+    if(cc1101Fault) {
+        if(millis() - lastCC1101Retry > CC1101_RETRY_MS) {
+            lastCC1101Retry = millis();
+            Serial.println("⚠️ CC1101 not responding, re-init...");
+            cc1101_applyConfig();
+        }
+    } else if(millis() - lastHeaterUpdate > 3000 && heaterPaired) {
         lastHeaterUpdate = millis();
         if(heaterVersion == "V1") updateHeaterStatus_V1();
         else updateHeaterStatus();
@@ -926,7 +1018,12 @@ void loop() {
     if(millis() - lastDisplayUpdate > 1000) {
         lastDisplayUpdate = millis();
 
-        if(heaterPaired && heaterStatus.lastUpdate > 0) {
+        if(cc1101Fault) {
+            displayLine1 = "DIESEL PILOT " + version;
+            displayLine2 = "RF FAULT";
+            displayLine3 = "! CC1101 !";
+            displayLine4 = "check wiring";
+        } else if(heaterPaired && heaterStatus.lastUpdate > 0) {
             displayLine1 = "DIESEL PILOT " + version;
             displayLine2 = String(getStateName(heaterStatus.state));
 
