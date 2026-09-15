@@ -443,6 +443,7 @@
             <div class="tab active" onclick="switchTab('pairing',this)">🔗 Pairing</div>
             <div class="tab" onclick="switchTab('wifi',this)">📡 WiFi</div>
             <div class="tab" onclick="switchTab('mqtt',this)">📨 MQTT</div>
+            <div class="tab" onclick="switchTab('telegram',this)">✈️ Telegram</div>
             <div class="tab" onclick="switchTab('timers',this)">⏱ Timers</div>
             <div class="tab" onclick="switchTab('ota',this)">⬆ OTA</div>
             <div class="tab" onclick="switchTab('system',this)">⚙️ System</div>
@@ -498,6 +499,56 @@
                 </div>
                 <button onclick="saveMQTT()">💾 SAVE MQTT</button>
                 <div class="info">Blank fields keep their saved value. Clear the broker address with <strong>__CLEAR__</strong> to disable MQTT.</div>
+            </div>
+        </div>
+
+        <!-- ✈️ TELEGRAM TAB -->
+        <div id="telegram" class="tab-content">
+            <div class="glass-card">
+                <h2>✈️ Telegram Bot</h2>
+
+                <div class="toggle-row">
+                    <span style="font-weight:600;">Enable bot</span>
+                    <label class="switch">
+                        <input type="checkbox" id="tgEnabled">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <input type="password" id="tgToken" autocomplete="new-password"
+                       placeholder="Bot token from @BotFather (empty = keep current)">
+
+                <input type="text" id="tgChats"
+                       placeholder="Allowed chat ids, comma separated">
+                <div class="info">
+                    Anyone can find a bot by name and message it, so only the ids
+                    listed here may control the heater. An empty list allows nobody.
+                </div>
+
+                <div class="form-row">
+                    <button onclick="discoverChat()">🔍 FIND MY CHAT ID</button>
+                    <button onclick="testTelegram()">✉️ SEND TEST</button>
+                </div>
+
+                <input type="number" id="tgPoll" min="5" max="300"
+                       placeholder="Poll interval, seconds (20 = default)">
+                <div class="info">
+                    Each poll costs mobile data. 20 s is a good balance; raise it
+                    if the plan is tight, lower it for snappier buttons.
+                </div>
+
+                <textarea id="tgCa" rows="3" placeholder="Custom root certificate (optional)"
+                          style="width:100%; box-sizing:border-box;"></textarea>
+                <div class="info">
+                    Leave empty to use the certificate bundled with the firmware.
+                    Only needed if Telegram changes its certificate authority.
+                </div>
+
+                <div class="info">
+                    Status: <strong id="tgState">--</strong>
+                </div>
+
+                <button onclick="saveTelegram()">💾 SAVE &amp; REBOOT</button>
             </div>
         </div>
 
@@ -642,6 +693,16 @@
 </div><!-- END SETTINGS OVERLAY -->
 
 <script>
+    // ── REQUEST HELPER ────────────────────────────────────────────
+    // Anything that changes state goes through here. The custom header is
+    // what stops a malicious page in another tab from driving the device:
+    // a cross-origin request cannot set it without a CORS preflight, which
+    // the firmware never answers.
+    function post(url) {
+        return fetch(url, { method: 'POST', headers: { 'X-DieselPilot': '1' } })
+            .then(r => r.text());
+    }
+
     // ── SETTINGS OVERLAY ──────────────────────────────────────────
     function toggleSettings() {
         const overlay = document.getElementById('settingsOverlay');
@@ -654,6 +715,48 @@
     document.getElementById('settingsOverlay').addEventListener('click', function(e) {
         if(e.target === this) toggleSettings();
     });
+
+    // ── TELEGRAM ──────────────────────────────────────────────────
+    function updateTelegramUI() {
+        fetch('/api/telegram/status')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('tgEnabled').checked = d.enabled;
+                document.getElementById('tgChats').value     = d.chats;
+                document.getElementById('tgPoll').value      = d.pollSec;
+                document.getElementById('tgToken').placeholder = d.tokenSet
+                    ? 'Token is set (empty = keep current)'
+                    : 'Bot token from @BotFather';
+                document.getElementById('tgCa').placeholder = d.customCa
+                    ? 'Custom certificate is set (empty = keep current)'
+                    : 'Custom root certificate (optional)';
+                document.getElementById('tgState').textContent =
+                    !d.enabled   ? 'disabled' :
+                    d.connected  ? 'connected' : 'connecting…';
+            })
+            .catch(() => {
+                document.getElementById('tgState').textContent = 'device unreachable';
+            });
+    }
+
+    function saveTelegram() {
+        const q = new URLSearchParams({
+            enabled: document.getElementById('tgEnabled').checked ? '1' : '0',
+            token:   document.getElementById('tgToken').value,
+            chats:   document.getElementById('tgChats').value,
+            pollSec: document.getElementById('tgPoll').value,
+            caCert:  document.getElementById('tgCa').value
+        });
+        post('/api/telegram?' + q).then(msg => alert(msg));
+    }
+
+    function discoverChat() {
+        post('/api/telegram/discover').then(msg => alert(msg));
+    }
+
+    function testTelegram() {
+        post('/api/telegram/test').then(msg => alert(msg));
+    }
 
     // ── TIMERS ────────────────────────────────────────────────────
     const toHHMM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' +
@@ -690,8 +793,8 @@
             ntpServer:  document.getElementById('tmNtp').value,
             tzOffset:   document.getElementById('tmTz').value
         });
-        fetch('/api/timers?' + q)
-            .then(r => r.text()).then(msg => { alert(msg); updateTimersUI(); })
+        post('/api/timers?' + q)
+            .then(msg => { alert(msg); updateTimersUI(); })
             .catch(() => alert('Device unreachable'));
     }
 
@@ -700,7 +803,8 @@
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         if(el) el.classList.add('active');
         document.getElementById(tab).classList.add('active');
-        if(tab === 'ota')    updateOtaUI();
+        if(tab === 'ota')      updateOtaUI();
+        if(tab === 'telegram') updateTelegramUI();
         if(tab === 'timers') updateTimersUI();
     }
 
@@ -712,23 +816,23 @@
 
     // ── HEATER COMMANDS ───────────────────────────────────────────
     function sendCmd(cmd) {
-        fetch(`/api/cmd?c=${cmd}`).then(r => r.text()).then(() => updateStatus());
+        post(`/api/cmd?c=${cmd}`).then(() => updateStatus());
     }
 
     // ── PAIRING ───────────────────────────────────────────────────
     function autoPair() {
         const version = document.getElementById('version').value;
         const freq    = document.getElementById('customFreq').value;
-        fetch(`/api/pair/auto?version=${version}&customFreq=${freq}`)
-            .then(r => r.text()).then(msg => alert(msg));
+        post(`/api/pair/auto?version=${version}&customFreq=${freq}`)
+            .then(msg => alert(msg));
     }
 
     function manualPair() {
         const addr    = document.getElementById('manualAddr').value;
         const version = document.getElementById('version').value;
         const freq    = document.getElementById('customFreq').value;
-        fetch(`/api/pair/manual?addr=${addr}&version=${version}&customFreq=${freq}`)
-            .then(r => r.text()).then(msg => alert(msg));
+        post(`/api/pair/manual?addr=${addr}&version=${version}&customFreq=${freq}`)
+            .then(msg => alert(msg));
     }
 
     // ── WIFI / MQTT / OTA ─────────────────────────────────────────
@@ -736,8 +840,8 @@
         const name = document.getElementById('deviceName').value;
         const ssid = document.getElementById('wifiSSID').value;
         const pass = document.getElementById('wifiPass').value;
-        fetch(`/api/wifi?deviceName=${encodeURIComponent(name)}&ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}`)
-            .then(r => r.text()).then(msg => alert(msg));
+        post(`/api/wifi?deviceName=${encodeURIComponent(name)}&ssid=${encodeURIComponent(ssid)}&pass=${encodeURIComponent(pass)}`)
+            .then(msg => alert(msg));
     }
 
     function saveMQTT() {
@@ -747,26 +851,26 @@
         const auth  = document.getElementById('mqttAuth').checked ? '1' : '0';
         const user  = document.getElementById('mqttUser').value;
         const pass  = document.getElementById('mqttPass').value;
-        fetch(`/api/mqtt?server=${encodeURIComponent(srv)}&port=${port}&topic=${encodeURIComponent(topic)}&authEnabled=${auth}&user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`)
-            .then(r => r.text()).then(msg => alert(msg));
+        post(`/api/mqtt?server=${encodeURIComponent(srv)}&port=${port}&topic=${encodeURIComponent(topic)}&authEnabled=${auth}&user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`)
+            .then(msg => alert(msg));
     }
 
     function rebootDevice() {
         if(confirm('Reboot device?'))
-            fetch('/api/reboot').then(r => r.text()).then(msg => alert(msg));
+            post('/api/reboot').then(msg => alert(msg));
     }
 
     function factoryReset() {
         if(confirm('⚠️ FACTORY RESET — Erase ALL settings?'))
-            fetch('/api/factory').then(r => r.text()).then(msg => alert(msg));
+            post('/api/factory').then(msg => alert(msg));
     }
 
     // ── OTA ───────────────────────────────────────────────────────
     function saveOTA() {
         const enabled = document.getElementById('otaToggle').checked ? '1' : '0';
         const pass    = document.getElementById('otaPass').value;
-        fetch(`/api/ota/config?enabled=${enabled}&password=${encodeURIComponent(pass)}`)
-            .then(r => r.text()).then(msg => alert(msg));
+        post(`/api/ota/config?enabled=${enabled}&password=${encodeURIComponent(pass)}`)
+            .then(msg => alert(msg));
     }
 
     // Header pill — driven by the background status poll, never touches the toggle.

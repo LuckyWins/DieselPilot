@@ -1172,6 +1172,17 @@ void handleRoot() {
 // covered by tests: this is exactly where the bug that erased the Wi-Fi
 // credentials used to live.
 
+// A cross-origin page cannot set a custom header without a CORS preflight,
+// which this server never answers. That alone stops a malicious site from
+// reaching the device through the browser of someone sitting on the same
+// network -- the realistic attack, now that the admin holds a bot token that
+// grants remote control of the heater.
+static bool csrfOk() {
+    if(server.header("X-DieselPilot") == "1") return true;
+    server.send(403, "text/plain", "Missing X-DieselPilot header");
+    return false;
+}
+
 static String formField(const char* name, const String& current) {
     return resolveField(server.hasArg(name), server.arg(name), current);
 }
@@ -1215,6 +1226,7 @@ void handleAPI_OTAStatus() {
 }
 
 void handleAPI_OTAConfig() {
+    if(!csrfOk()) return;
     // Toggle OTA ON/OFF and (optionally) set the flashing password.
     otaEnabled  = formFlag("enabled", otaEnabled);
     otaPassword = formField("password", otaPassword);
@@ -1228,6 +1240,7 @@ void handleAPI_OTAConfig() {
 }
 
 void handleAPI_Command() {
+    if(!csrfOk()) return;
     String cmd = server.arg("c");
     if(cmd == "power")      sendCommand(CMD_POWER);
     else if(cmd == "up")    sendCommand(CMD_UP);
@@ -1237,6 +1250,7 @@ void handleAPI_Command() {
 }
 
 void handleAPI_PairAuto() {
+    if(!csrfOk()) return;
     String ver = server.arg("version");
     String customFreqStr = server.arg("customFreq");
     if(ver.length() == 0) ver = "V2";
@@ -1269,6 +1283,7 @@ void handleAPI_PairAuto() {
 }
 
 void handleAPI_PairManual() {
+    if(!csrfOk()) return;
     String addrStr = server.arg("addr");
     String ver = server.arg("version");
     String customFreqStr = server.arg("customFreq");
@@ -1297,6 +1312,7 @@ void handleAPI_PairManual() {
 }
 
 void handleAPI_WiFi() {
+    if(!csrfOk()) return;
     deviceName  = formField("deviceName", deviceName);
     if(deviceName.length() == 0) deviceName = "DieselPilot";
     staSSID     = formField("ssid", staSSID);
@@ -1308,6 +1324,7 @@ void handleAPI_WiFi() {
 }
 
 void handleAPI_MQTT() {
+    if(!csrfOk()) return;
     mqttServer      = formField("server", mqttServer);
     mqttPort        = formNumber("port", mqttPort, 1, 65535);
     mqttTopic       = formField("topic", mqttTopic);
@@ -1326,6 +1343,7 @@ void handleAPI_MQTT() {
 }
 
 void handleAPI_Timers() {
+    if(!csrfOk()) return;
     ntpServer           = formField("ntpServer", ntpServer);
     tzOffsetMin         = formNumber("tzOffset", tzOffsetMin, -720, 840);
     autoOffMin          = formNumber("autoOff", autoOffMin, 0, 1440);
@@ -1362,6 +1380,7 @@ void handleAPI_TimerStatus() {
 }
 
 void handleAPI_Telegram() {
+    if(!csrfOk()) return;
     tgEnabled = formFlag("enabled", tgEnabled);
     tgToken   = formField("token", tgToken);
     tgChats   = formField("chats", tgChats);
@@ -1401,11 +1420,13 @@ void handleAPI_TelegramStatus() {
 // owner can discover their chat id without trusting a third-party bot.
 // Time-limited on purpose: a permanent one would be a standing invitation.
 void handleAPI_TelegramDiscover() {
+    if(!csrfOk()) return;
     tgDiscoverUntilMs = millis() + 5UL * 60UL * 1000UL;
     server.send(200, "text/plain", "Write /id to the bot within 5 minutes");
 }
 
 void handleAPI_TelegramTest() {
+    if(!csrfOk()) return;
     if(!tgEnabled)            { server.send(200, "text/plain", "Telegram is disabled"); return; }
     if(tgChats.length() == 0) { server.send(200, "text/plain", "No chat ids configured"); return; }
     if(!tgReady)              { server.send(200, "text/plain", "Bot not connected yet"); return; }
@@ -1428,11 +1449,13 @@ void handleAPI_Info() {
 }
 
 void handleAPI_Reboot() {
+    if(!csrfOk()) return;
     server.send(200, "text/plain", "Rebooting...");
     delay(500); ESP.restart();
 }
 
 void handleAPI_Factory() {
+    if(!csrfOk()) return;
     server.send(200, "text/plain", "Factory reset in progress...");
     Serial.println("\n⚠️ FACTORY RESET");
     prefs.clear();
@@ -1576,6 +1599,10 @@ void setup() {
     server.on("/api/timers/status",handleAPI_TimerStatus);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
     server.on("/api/ota/config",   handleAPI_OTAConfig);
+    // WebServer discards any header not listed here.
+    const char* collectedHeaders[] = { "X-DieselPilot" };
+    server.collectHeaders(collectedHeaders, 1);
+
     server.begin();
 
     // Arm the watchdog last: the code above contains legitimate delays —
