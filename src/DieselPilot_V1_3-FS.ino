@@ -77,6 +77,17 @@
 // Retry period for re-initialising the CC1101 after a fault
 #define CC1101_RETRY_MS 30000
 
+// Total time the V2 search listens for, and the length of one listening
+// slice. The search used to hold loop() for the whole minute; slicing it
+// keeps the web server, Telegram and the watchdog alive meanwhile.
+#define PAIR_WINDOW_MS 60000
+#define PAIR_SLICE_MS  400
+
+// Accepted range for a hand-entered frequency, in hertz. The CC1101 covers
+// several bands; anything outside this is a typo, most often kilohertz.
+#define FREQ_MIN_HZ 300000000UL
+#define FREQ_MAX_HZ 928000000UL
+
 // Wi-Fi reconnect backoff bounds. The garage sits on the edge of town and
 // the link can be down for hours, so retries back off instead of hammering.
 #define WIFI_RETRY_MIN_MS 5000
@@ -187,6 +198,12 @@ uint32_t tgDiscoverUntilMs = 0;
 uint32_t heaterAddress = 0x00000000;
 uint8_t packetSeq = 0;
 bool heaterPaired = false;
+
+// V2 pairing runs as a state machine in loop() rather than blocking the
+// request handler for a minute.
+enum PairState { PAIR_IDLE, PAIR_SEARCHING, PAIR_OK, PAIR_FAILED };
+PairState pairState      = PAIR_IDLE;
+uint32_t  pairDeadlineMs = 0;
 
 // Status
 struct {
@@ -372,7 +389,7 @@ void cc1101_init_V1() {
     for(int i = 0; i < sizeof(configRegsV1); i += 2)
         cc1101_writeReg(configRegsV1[i], configRegsV1[i+1]);
     cc1101_strobe(0x36); delay(5); cc1101_strobe(0x34);
-    Serial.println("✅ CC1101 initialized @ 433.892 MHz (V1)");
+    Serial.println("✅ CC1101 initialized @ 433.920 MHz (V1)");
 }
 
 void cc1101_applyConfig() {
@@ -462,6 +479,7 @@ void updateHeaterStatus_V1() {
             byte buf[10];
             for(int i = 0; i < 10; i++) buf[i] = cc1101_readReg(0xBF);
             decodePacket_V1(buf);
+            addErrorToHistory(heaterStatus.errorCode);
             rxFlushV1(); rxEnableV1();
         }
     }
@@ -589,6 +607,33 @@ uint32_t findHeater(uint16_t timeout) {
                ((uint32_t)buf[4] << 8) | buf[5];
     }
     return 0;
+}
+
+// Listens in short slices so the rest of the loop keeps running. The window
+// and the "first valid frame wins" rule are unchanged from the blocking
+// version; only the waiting is broken up.
+void updatePairing() {
+    if(pairState != PAIR_SEARCHING) return;
+
+    if((int32_t)(pairDeadlineMs - millis()) <= 0) {
+        pairState = PAIR_FAILED;
+        displayLine2 = "Pair failed";
+        Serial.println("⚠️ Pairing timed out");
+        return;
+    }
+
+    uint8_t buf[32];
+    if(!receivePacket(buf, PAIR_SLICE_MS)) return;
+
+    uint32_t addr = ((uint32_t)buf[2] << 24) | ((uint32_t)buf[3] << 16) |
+                    ((uint32_t)buf[4] << 8) | buf[5];
+    if(addr == 0) return;
+
+    heaterAddress = addr;
+    heaterPaired  = true;
+    prefs.putUInt("heaterAddr", heaterAddress);
+    pairState = PAIR_OK;
+    Serial.printf("✅ Paired with 0x%08X\n", heaterAddress);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1255,7 +1300,16 @@ void handleAPI_PairAuto() {
     String customFreqStr = server.arg("customFreq");
     if(ver.length() == 0) ver = "V2";
 
-    uint32_t newCustomFreq = customFreqStr.length() > 0 ? customFreqStr.toInt() : 0;
+    uint32_t newCustomFreq = 0;
+    if(customFreqStr.length() > 0) {
+        long f = customFreqStr.toInt();
+        if(f < (long)FREQ_MIN_HZ || f > (long)FREQ_MAX_HZ) {
+            server.send(400, "text/plain",
+                        "Frequency must be given in hertz, 300-928 MHz");
+            return;
+        }
+        newCustomFreq = (uint32_t)f;
+    }
 
     if(ver != heaterVersion || newCustomFreq != customFrequency) {
         heaterVersion = ver; customFrequency = newCustomFreq;
@@ -1272,13 +1326,11 @@ void handleAPI_PairAuto() {
         char addrStr[16]; sprintf(addrStr, "%02X%02X%02X", myAddrV1[0], myAddrV1[1], myAddrV1[2]);
         server.send(200, "text/plain", "V1 Paired! ID: " + String(addrStr));
     } else {
-        uint32_t addr = findHeater(60000);
-        if(addr != 0) {
-            heaterAddress = addr; heaterPaired = true; prefs.putUInt("heaterAddr", heaterAddress);
-            server.send(200, "text/plain", "V2 Paired: 0x" + String(heaterAddress, HEX));
-        } else {
-            server.send(200, "text/plain", "V2 Pairing failed!");
-        }
+        pairState      = PAIR_SEARCHING;
+        pairDeadlineMs = millis() + PAIR_WINDOW_MS;
+        displayLine2   = "Pairing...";
+        server.send(200, "text/plain",
+                    "Listening for 60 s — press and hold the pairing button");
     }
 }
 
@@ -1288,7 +1340,17 @@ void handleAPI_PairManual() {
     String ver = server.arg("version");
     String customFreqStr = server.arg("customFreq");
     if(ver.length() == 0) ver = "V2";
-    uint32_t newCustomFreq = customFreqStr.length() > 0 ? customFreqStr.toInt() : 0;
+
+    uint32_t newCustomFreq = 0;
+    if(customFreqStr.length() > 0) {
+        long f = customFreqStr.toInt();
+        if(f < (long)FREQ_MIN_HZ || f > (long)FREQ_MAX_HZ) {
+            server.send(400, "text/plain",
+                        "Frequency must be given in hertz, 300-928 MHz");
+            return;
+        }
+        newCustomFreq = (uint32_t)f;
+    }
 
     if(ver != heaterVersion || newCustomFreq != customFrequency) {
         heaterVersion = ver; customFrequency = newCustomFreq;
@@ -1377,6 +1439,70 @@ void handleAPI_TimerStatus() {
     json += "\"cooldown\":" + String(cooldownExpectedMin);
     json += "}";
     server.send(200, "application/json", json);
+}
+
+void handleAPI_PairStatus() {
+    const char* st = "idle";
+    if(pairState == PAIR_SEARCHING) st = "searching";
+    else if(pairState == PAIR_OK)   st = "paired";
+    else if(pairState == PAIR_FAILED) st = "failed";
+
+    int32_t left = (pairState == PAIR_SEARCHING)
+                 ? (int32_t)(pairDeadlineMs - millis()) / 1000 : 0;
+    if(left < 0) left = 0;
+
+    String json = "{";
+    json += "\"state\":\"" + String(st) + "\",";
+    json += "\"secondsLeft\":" + String(left) + ",";
+    json += "\"addr\":\"" + (heaterPaired ? String(heaterAddress, HEX) : String("")) + "\"";
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+// Current settings for pre-filling the forms. Secrets are reported as a flag
+// only: a blank field means "keep", so the page never needs their values.
+void handleAPI_Config() {
+    String json = "{";
+    json += "\"deviceName\":\"" + deviceName + "\",";
+    json += "\"staSSID\":\"" + staSSID + "\",";
+    json += "\"staPassSet\":" + String(staPassword.length() > 0 ? "true" : "false") + ",";
+    json += "\"mqttServer\":\"" + mqttServer + "\",";
+    json += "\"mqttPort\":" + String(mqttPort) + ",";
+    json += "\"mqttTopic\":\"" + mqttTopic + "\",";
+    json += "\"mqttAuth\":" + String(mqttAuthEnabled ? "true" : "false") + ",";
+    json += "\"mqttUser\":\"" + mqttUser + "\",";
+    json += "\"mqttPassSet\":" + String(mqttPassword.length() > 0 ? "true" : "false") + ",";
+    json += "\"heaterVersion\":\"" + heaterVersion + "\",";
+    json += "\"customFreq\":" + String(customFrequency);
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+// The ring buffer was filled but never read anywhere. Newest entry first.
+void handleAPI_Errors() {
+    int count = errorHistoryIndex < 10 ? errorHistoryIndex : 10;
+    String json = "[";
+    for(int i = 0; i < count; i++) {
+        int idx = (errorHistoryIndex - 1 - i) % 10;
+        if(i) json += ",";
+        json += "{\"code\":" + String(errorHistory[idx].errorCode) +
+                ",\"name\":\"" + String(getErrorName(errorHistory[idx].errorCode)) + "\"" +
+                ",\"agoSec\":" + String((millis() - errorHistory[idx].timestamp) / 1000) + "}";
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+}
+
+// Forgetting the heater used to require a factory reset, which also wiped
+// WiFi and MQTT.
+void handleAPI_Unpair() {
+    if(!csrfOk()) return;
+    heaterAddress = 0;
+    heaterPaired  = false;
+    pairState     = PAIR_IDLE;
+    heaterStatus.lastUpdate = 0;
+    prefs.putUInt("heaterAddr", 0);
+    server.send(200, "text/plain", "Heater forgotten");
 }
 
 void handleAPI_Telegram() {
@@ -1586,6 +1712,10 @@ void setup() {
     server.on("/api/cmd",          handleAPI_Command);
     server.on("/api/pair/auto",    handleAPI_PairAuto);
     server.on("/api/pair/manual",  handleAPI_PairManual);
+    server.on("/api/pair/status",  handleAPI_PairStatus);
+    server.on("/api/unpair",       handleAPI_Unpair);
+    server.on("/api/config",       handleAPI_Config);
+    server.on("/api/errors",       handleAPI_Errors);
     server.on("/api/wifi",         handleAPI_WiFi);
     server.on("/api/mqtt",         handleAPI_MQTT);
     server.on("/api/factory",      handleAPI_Factory);
@@ -1642,6 +1772,7 @@ void loop() {
     yield();
     superviseWiFi();
     updateTimeSync();
+    updatePairing();
     updateTelegram();
     updateTelegramCommands();
     updateNotifications();
