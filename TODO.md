@@ -5,6 +5,40 @@ here; this is only what to come back to.
 
 ---
 
+## Before the controller is installed
+
+Everything else here can wait. This one cannot: a partition table can only be
+written over USB, together with the bootloader. There is no way to repartition
+over the air. While the board is on the desk this costs one line; once it is
+hanging in the garage it costs a hundred-kilometre drive.
+
+- [ ] **Switch `board_build.partitions` from `default.csv` to
+      `min_spiffs.csv`.**
+
+      `default.csv` splits the 4 MB into two 1.25 MB app slots and **1.375 MB
+      of filesystem** — for a single `index.html` of 53 KB. `min_spiffs.csv`
+      gives 1.875 MB app slots and a 128 KB filesystem instead.
+
+      Measured, both firmware and filesystem image built:
+
+      | | `default.csv` | `min_spiffs.csv` |
+      |---|---|---|
+      | App slot | 1 310 720 B | 1 966 080 B |
+      | Used | 84.9% | **56.6%** |
+      | Free | 198 KB | **834 KB** |
+      | Filesystem | 1.375 MB | 128 KB, 53 KB used |
+
+      Nothing has to be rewritten. For comparison, every other flash saving
+      available comes to maybe 30 KB in total, and each costs something we
+      want: mDNS is 23 KB but arrives with OTA, the whole of PubSubClient is
+      2.5 KB, and stripping float formatting was measured at 624 bytes.
+
+      Headroom afterwards: `index.html` grew from 744 to about 1150 lines in
+      one session. At 80 KB it still fits in 128, but the margin narrows —
+      serving it gzipped would take 53 KB down to roughly 12.
+
+---
+
 ## Verify on real hardware
 
 - [ ] **OTA through Telegram.** `AsyncTelegram2` claims firmware updates by
