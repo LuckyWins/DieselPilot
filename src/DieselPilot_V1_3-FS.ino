@@ -194,6 +194,13 @@ uint16_t cooldownExpectedMin = 5;
 bool     startArmed  = false;
 uint32_t startTarget = 0;
 
+// One-shot runtime limit for the current burn, overriding autoOffMin. The
+// configured value is one number for every run, but a forty-minute preheat
+// and an afternoon in the garage are different -- and the web GUI that holds
+// it is only reachable on the local network, so from the road there was no
+// way to change it at all. Zero means "use the configured default".
+uint16_t sessionAutoOffMin = 0;
+
 // Telegram. The bot is the only remote channel, so the chat whitelist is the
 // single thing standing between a stranger and the heater.
 bool   tgEnabled = false;
@@ -949,6 +956,9 @@ static String tgStatusText() {
     if(startArmed) {
         m += "\nScheduled start: " + clockOfPublic(startTarget);
     }
+    if(sessionAutoOffMin) {
+        m += "\nRuntime limit: " + String(sessionAutoOffMin) + " min (this burn)";
+    }
     m += "\nClock:    " + String(timeValid ? currentTimeString() : String("not synced"));
     m += "\nHeap:     " + String(ESP.getFreeHeap() / 1024) + " KB free, min " +
          String(ESP.getMinFreeHeap() / 1024) + " KB";
@@ -965,6 +975,9 @@ static void tgSendStatus(int64_t chatId) {
     kb.addButton("− 1",     "dn", KeyboardButtonQuery);
     kb.addButton("+ 1",     "up", KeyboardButtonQuery);
     kb.addButton("⚙️ Mode", "md", KeyboardButtonQuery);
+    kb.addRow();
+    kb.addButton("−30 min", "t-", KeyboardButtonQuery);
+    kb.addButton("+30 min", "t+", KeyboardButtonQuery);
     tgBot.sendTo(chatId, tgStatusText(), kb.getJSON());
 }
 
@@ -989,7 +1002,23 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
             "/at 06:30 - start at that time\n"
             "/in 2h - start after that delay\n"
             "/cancel - drop a pending scheduled start\n"
+            "/for 90 - run for 90 minutes this time only\n"
             "/id - show your chat id");
+        return;
+    }
+
+    if(cmd.startsWith("/for ") || cmd == "t+" || cmd == "t-") {
+        int base = sessionAutoOffMin ? sessionAutoOffMin : autoOffMin;
+        int want = cmd.startsWith("/for ") ? cmd.substring(5).toInt()
+                 : (cmd == "t+" ? base + 30 : base - 30);
+
+        if(want < 0)    want = 0;
+        if(want > 1440) want = 1440;
+        sessionAutoOffMin = (uint16_t)want;
+
+        tgBot.sendTo(chatId, want == 0
+            ? "Runtime limit off for this burn"
+            : "Runtime limit set to " + String(want) + " min for this burn");
         return;
     }
 
@@ -1271,6 +1300,7 @@ void updateScheduler() {
 
     if(heaterStatus.state == STATE_OFF) {
         heaterOnSinceValid = false;
+        sessionAutoOffMin  = 0;   // the override lasts one burn only
     } else if(!heaterOnSinceValid) {
         // Either the heater just started, or the controller rebooted while it
         // was already running. In the second case the runtime limit counts
@@ -1289,7 +1319,7 @@ void updateScheduler() {
     in.nowMinutes          = timeValid ? currentMinutesOfDay() : -1;
     in.shutdownRequested   = shutdownRequested;
     in.shutdownAtMs        = shutdownAtMs;
-    in.autoOffMin          = autoOffMin;
+    in.autoOffMin          = sessionAutoOffMin ? sessionAutoOffMin : autoOffMin;
     in.blackoutEnabled     = blackoutEnabled;
     in.blackoutMinutes     = blackoutMinutes;
     in.shutdownLeadMin     = shutdownLeadMin;
