@@ -236,8 +236,6 @@ String displayLine3 = "";
 String displayLine4 = "";
 
 // Timing
-unsigned long lastUpdate = 0;
-unsigned long lastDisplay = 0;
 unsigned long lastMQTTRetry = 0;
 const unsigned long mqttRetryInterval = 30000;
 
