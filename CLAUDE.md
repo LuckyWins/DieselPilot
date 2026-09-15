@@ -15,8 +15,9 @@ the path to Home Assistant should that ever be wanted.
 - Tests: `make test` — pure logic, runs on the host with no hardware attached
 - Deferred tasks and the rationale behind rejected options live in `TODO.md`
 - Written in English: everything in the repository — code comments, both
-  CLAUDE.md files, tests, `platformio.ini`, `Makefile`, commit messages
-- Written in Russian: `TODO.md` and conversation with the user
+  CLAUDE.md files, `TODO.md`, `README.md`, tests, `platformio.ini`,
+  `Makefile`, commit messages
+- Written in Russian: conversation with the user
 
 ## Commits
 

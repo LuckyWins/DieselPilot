@@ -1,202 +1,210 @@
-# TODO — идеи на будущее
+# TODO — ideas for later
 
-Всё, что осознанно отложено. Текущий план работ здесь не дублируется —
-только то, к чему можно вернуться позже.
-
----
-
-## Проверить на живом железе
-
-- [ ] **OTA через Telegram.** `AsyncTelegram2` заявляет обновление прошивки
-      отправкой файла боту. Если работает — закрывает удалённое обновление
-      без белого IP, и услуга «Статическое имя» от МТС не нужна вовсе.
-- [ ] **Держится ли TCP между вызовами `getUpdates`.** От этого трафик
-      отличается в 12 раз: ~37 МБ/мес при переиспользовании соединения
-      против ~430 МБ/мес, если TLS-хендшейк на каждый запрос.
-- [ ] **Реальная длительность TLS-хендшейка** на плохой связи — нужна
-      для выбора таймаута watchdog.
-- [ ] **Адрес I2C дисплея.** U8g2 по умолчанию бьёт в 0x3C. Если модуль
-      на 0x3D — нужен `display.setI2CAddress(0x3D * 2)`.
-- [ ] **Белый IP у МТС.** `curl -4 ifconfig.me` против WAN-адреса модема.
-      Адрес из 100.64.0.0/10 = CGNAT. Нужно только если вернёмся
-      к прямому доступу извне.
+Everything deliberately postponed. The current work plan is not duplicated
+here; this is only what to come back to.
 
 ---
 
-## Мониторинг
+## Verify on real hardware
 
-- [ ] **Пережить ночное отключение питания.** Вся оперативная память
-      теряется каждую ночь в 22:00: история ошибок, минимальная свободная
-      куча, максимальное время цикла, факт «отопитель работал в момент
-      обесточивания». Если ошибка случилась в 21:50, к утру от неё
-      не останется следа.
-
-      Сохранять в NVS последние несколько ошибок и флаг «работал при
-      пропаже питания», записывая только при изменении — иначе износ
-      флеша. Заодно даст утреннее уведомление вида «вчера погас
-      не штатно».
-
-
-- [ ] **Снять показания диагностики со стенда и решить, что с ними делать.**
-      В `/api/info` и в статусе бота теперь отдаются свободная куча,
-      минимальная за всё время и максимальное время итерации цикла.
-      Минимальная куча — главный из трёх: медленная течь и фрагментация
-      проявятся там задолго до того, как что-то сломается видимо.
-      После недели работы посмотреть цифры и подумать: нужен ли порог
-      с уведомлением, стоит ли выводить это на дисплей, не пора ли
-      браться за ArduinoJson.
-
-
-- [ ] **Внешний dead-man switch.** Прошивка умеет сообщать о проблемах,
-      которые видит сама, но о собственной смерти сказать не может.
-      Правило «нет сообщения о загрузке после 06:30» требует, чтобы
-      отсутствие кто-то заметил снаружи.
-
-      Сервисы: Healthchecks.io, Cronitor, BetterStack, heartbeat-режим
-      UptimeRobot. Устройство периодически дёргает URL, сервис поднимает
-      тревогу, если пинг не пришёл.
-
-      Почему подходит: пинг исходящий (обычный HTTPS GET), работает
-      за CGNAT, открывать ничего не нужно. Cron-расписание позволяет
-      пометить окно 22:00–06:00 как ожидаемый простой — свет в гараже
-      отключают, ложных тревог не будет. Уведомления в том числе
-      в Telegram, то есть всё в одном месте.
-
-      В прошивке ~20 строк поверх `WiFiClientSecure`: URL в настройках,
-      пинг раз в 15 минут, тихий отказ при недоступности.
-      Бесплатных тарифов хватает с запасом — лимиты проверить перед
-      подключением.
+- [ ] **OTA through Telegram.** `AsyncTelegram2` claims firmware updates by
+      sending the file to the bot. If it works, remote updates need no public
+      IP at all, and the MTS "static name" service is unnecessary.
+- [ ] **Whether TCP is reused between `getUpdates` calls.** Traffic differs by
+      a factor of twelve: roughly 37 MB/month with a reused connection against
+      430 MB/month if every poll does a TLS handshake.
+- [ ] **How long a TLS handshake actually takes** on a poor link — needed to
+      pick the watchdog timeout.
+- [ ] **The display's I2C address.** U8g2 defaults to 0x3C. If the module is
+      strapped to 0x3D it needs `display.setI2CAddress(0x3D * 2)`.
+- [ ] **Whether MTS hands out a public IP.** `curl -4 ifconfig.me` against the
+      modem's WAN address; anything in 100.64.0.0/10 is CGNAT. Only relevant
+      if direct access from the internet ever comes back on the table.
 
 ---
 
-## Удалённый доступ
+## Monitoring
 
-- [ ] **Включить настоящий откат OTA.** Сейчас защита есть в загрузчике
-      (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=1`), но полностью
-      нейтрализована: ядро вызывает `verifyOta()`, который по умолчанию
-      возвращает `true`, и подтверждает любой залитый образ в
-      `initArduino()` — ещё до нашего `setup()`.
+- [ ] **Survive the overnight power cut.** All RAM state is lost every night at
+      22:00: the error history, the minimum free heap, the longest loop
+      iteration, and whether the heater was burning when the power went. An
+      error at 21:50 leaves no trace by morning.
 
-      Лечится переопределением слабого символа `verifyRollbackLater()`
-      на `true`: тогда решение откладывается, и образ подтверждаем мы
-      сами — например, только после того, как поднялась сеть и бот
-      достучался до Telegram. Не подтвердили за N минут — перезагрузка,
-      и загрузчик вернёт предыдущую прошивку.
+      Persist the last few errors and a "was running at power loss" flag to
+      NVS, writing only on change to avoid wearing the flash. It would also
+      give a morning notification along the lines of "last night's shutdown
+      was not clean".
 
-      Хорошо складывается с watchdog'ом: зависшая новая прошивка будет
-      перезагружена сторожевым таймером и, не успев подтвердиться,
-      откатится. Превращает «залил кривое по воздуху» из поездки
-      за сто километров в самовосстановление.
+- [ ] **Read the diagnostics off a running device and decide what to do with
+      them.** `/api/info` and the bot's status now carry free heap, minimum
+      free heap since boot and the longest loop iteration. The minimum heap is
+      the one that matters: a slow leak or fragmentation shows up there long
+      before anything visibly breaks.
 
+      After a week of uptime, look at the figures and decide whether they
+      deserve a threshold with a notification, a line on the display, or
+      whether it is time to take on ArduinoJson.
 
-- [ ] **MQTT + Home Assistant.** Код MQTT уже есть и полностью инертен,
-      пока не задан адрес брокера. Достаточно вписать адрес — заработает.
-      Нужен, если захочется графиков, истории и автоматизаций.
-- [ ] **HA MQTT discovery** — чтобы сущности появлялись в Home Assistant
-      сами, без ручного YAML.
-- [ ] **Прямой доступ к веб-морде из интернета.** Требует: белый IP,
-      HTTPS на ESP32 (`esp_https_server` есть в составе фреймворка),
-      свой CA с установкой на телефон, защиту от сканеров.
-      Отклонено в пользу Telegram — см. раздел внизу.
+- [ ] **External dead-man switch.** The firmware reports problems it can see,
+      but it cannot report its own death. The rule "no boot message after
+      06:30" needs somebody outside to notice the absence.
 
----
+      Services: Healthchecks.io, Cronitor, BetterStack, or UptimeRobot's
+      heartbeat mode. The device pings a URL periodically and the service
+      raises the alarm when a ping fails to arrive.
 
-## Безопасность
+      Why it fits: the ping is outbound, an ordinary HTTPS GET, so it works
+      behind CGNAT with nothing exposed. A cron schedule marks 22:00–06:00 as
+      expected downtime, so the nightly power cut raises no false alarms.
+      Notifications can go to Telegram, keeping everything in one place.
 
-- [ ] **Полноценная авторизация в админке**: сессии с токеном, PBKDF2
-      вместо хранения пароля, защита от перебора, `HttpOnly` +
-      `SameSite=Strict`. Сейчас ограничились анти-CSRF заголовком
-      `X-DieselPilot` и переводом мутирующих запросов на POST —
-      этого хватает, пока админка доступна только из локальной сети.
-- [ ] **Шифрование NVS.** Токен бота и пароли лежат открытым текстом.
-      Актуально только при угрозе физического доступа к плате.
+      Around twenty lines on top of the existing `WiFiClientSecure`: a URL in
+      the settings, a ping every fifteen minutes, silent failure. Free tiers
+      are ample — check the limits before relying on one.
 
 ---
 
-## Качество кода
+## Remote access
 
-- [ ] **Проверить, не мешает ли холостой опрос отопителя раз в 10 секунд.**
-      Было 3 секунды круглосуточно. Медленный режим включается, когда
-      отопитель в `OFF`, и возвращается к 3 секундам на минуту после любой
-      команды. Если на практике окажется, что состояние обновляется
-      слишком лениво — поднять `HEATER_POLL_IDLE_MS` обратно или снизить
-      до 5 секунд. Константа рядом с `HEATER_POLL_FAST_MS`.
+- [ ] **Make OTA rollback actually work.** The protection exists in the
+      bootloader (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=1`) but is completely
+      defeated: the core calls `verifyOta()`, which returns `true` by default,
+      and confirms any uploaded image inside `initArduino()` — before the
+      sketch's own `setup()` ever runs.
 
+      The fix is to override the weak symbol `verifyRollbackLater()` to return
+      `true`. That defers the verdict, and the image is then confirmed by our
+      own code — only once the network is up and the bot has reached Telegram,
+      say. No confirmation within N minutes means a reboot, and the bootloader
+      restores the previous firmware.
 
-- [ ] **Проверить на стенде: `sendCommand()` ждёт `TXBYTES == 0x01`**
-      строгим равенством. Если счётчик проскочит это значение, цикл
-      крутится до таймаута в 100 мс. Наблюдать, как реально ведёт себя
-      регистр при передаче.
-- [ ] **Проверить на стенде: логика повторов в `sendCommand()`.**
-      При успехе кадр уходит десять раз подряд, при одном таймауте
-      функция бросает все оставшиеся попытки. Непонятно, намеренная ли
-      это избыточность.
-- [ ] **Проверить на стенде: `ambientTemp = (b8 & 0x0F) + 10` в V1**
-      даёт диапазон 10–25 °C, отрицательные температуры непредставимы.
-      Для зимнего гаража странно — возможно, в протоколе есть знак,
-      который декодер теряет.
-- [ ] **Блокирующие задержки в автоменю V1** — около 350 мс каждые 3.5 с.
-      Это не лень автора: после `strobe(0x35)` кадр должен успеть уйти
-      в эфир. Переделка в конечный автомат меняет тайминги протокола,
-      поэтому только со стендом.
-- [ ] **ArduinoJson вместо ручной сборки ответов.** Уже слинкован ради
-      Telegram. Устранил бы структурно и экранирование, и фрагментацию
-      кучи, но это переписывание восьми обработчиков и рост флеша,
-      который сейчас на 84%.
+      It composes well with the watchdog: a new firmware that hangs gets
+      rebooted by the timer and, never having confirmed itself, rolls back.
+      Turns "flashed something broken over the air" from a hundred-kilometre
+      drive into self-recovery.
 
-- [ ] **Продолжить распил `.ino` на модули.** Вынесены `protocol` и
-      `settings`, осталось ~930 строк. Кандидаты: `cc1101`, `web`, `display`.
-      На хосте собирается только то, что лежит в отдельных `.cpp`, —
-      всё остальное тестами не покрывается.
-- [ ] **Расширить нативные тесты** на декодер пакетов V1/V2 — требует
-      вынести парсинг в чистые функции без глобальных переменных
-      (`decodePacket_V1` и разбор ответа V2 сейчас пишут прямо в
-      `heaterStatus`). Инфраструктура готова: `pio test -e native`.
-- [ ] **Убрать `delay(2000)`** из инициализации дисплея — чистая заставка,
-      задерживает старт.
-- [ ] **Неблокирующий `connectMQTT()`** — сейчас до 3 попыток
-      с `delay(2000)`, блокирует `loop()` на 4+ секунды.
+- [ ] **MQTT + Home Assistant.** The MQTT code is already there and completely
+      inert until a broker address is set. Entering one is all it takes. Worth
+      it if graphs, history and automations are ever wanted.
+- [ ] **HA MQTT discovery** so entities appear in Home Assistant on their own,
+      without hand-written YAML.
+- [ ] **Direct access to the web GUI from the internet.** Requires a public IP,
+      HTTPS on the ESP32 (`esp_https_server` ships with the framework), a
+      private CA installed on every client, and hardening against scanners.
+      Rejected in favour of Telegram — see the table at the bottom.
 
 ---
 
-## Мелочи в интерфейсе
+## Security
 
-- [ ] **Поднимать mDNS независимо от OTA и объявлять веб-сервис.**
-      Сейчас `ArduinoOTA.begin()` внутри вызывает `MDNS.begin(hostname)`,
-      поэтому `<deviceName>.local` резолвится — но только пока включён
-      тумблер OTA, а `MDNS.enableArduino()` объявляет лишь службу для
-      среды разработки, не HTTP.
-
-      Правка на три строки: `MDNS.begin()` всегда плюс
-      `MDNS.addService("http", "tcp", 80)`. Смысл в том, что IP выдаёт
-      модем по DHCP и может менять, а посмотреть выданный адрес
-      в гараже негде. Имя не меняется никогда.
-
-      Оговорка: `.local` работает из коробки на macOS, iOS и Windows 10+,
-      на Android поддержка неровная. Как замена IP годится,
-      как единственный путь — нет.
-
-
-- [ ] **Защита от промерзания.** «Если в гараже ниже X градусов —
-      прогреться N минут». Данные (`ambientTemp`) и планировщик уже есть,
-      нужна только пороговая ветка. Отложено: таких температур в этом
-      гараже пока не наблюдалось.
-
-
-- [ ] **Переснять скриншот веб-морды для README.** Текущий сделан
-      до появления вкладок Telegram и Timers, под него в README стоит
-      пометка — снять её после замены. Нужен живой стенд.
+- [ ] **Proper authentication in the admin page**: session tokens, PBKDF2
+      instead of a stored password, brute-force protection, `HttpOnly` plus
+      `SameSite=Strict`. For now this stops at the `X-DieselPilot` anti-CSRF
+      header and moving mutating requests to POST, which is enough while the
+      admin page is reachable only from the local network.
+- [ ] **NVS encryption.** The bot token and the passwords sit there in plain
+      text. Only relevant against physical access to the board.
 
 ---
 
-## Отклонено (чтобы не возвращаться к анализу)
+## Code quality
 
-| Идея | Почему отклонена |
+- [ ] **Check whether the ten-second idle heater poll feels too lazy.** It used
+      to be three seconds around the clock. The slow rate applies while the
+      heater reports OFF and returns to three seconds for a minute after any
+      command. If state updates turn out to lag in practice, raise
+      `HEATER_POLL_IDLE_MS` back or drop it to five seconds. The constant sits
+      next to `HEATER_POLL_FAST_MS`.
+
+- [ ] **Verify on hardware: `sendCommand()` waits for `TXBYTES == 0x01`** with
+      strict equality. If the counter skips that value the loop spins until the
+      100 ms timeout. Watch how the register actually behaves during a
+      transmission.
+- [ ] **Verify on hardware: the retry logic in `sendCommand()`.** On success
+      the frame goes out ten times in a row; on a single timeout the function
+      abandons every remaining attempt. It is unclear whether that redundancy
+      is deliberate.
+- [ ] **Verify on hardware: `ambientTemp = (b8 & 0x0F) + 10` in V1** yields a
+      range of 10–25 °C, with no way to express a negative temperature. Odd for
+      a winter garage — the protocol may carry a sign the decoder drops.
+- [ ] **Blocking delays in the V1 auto-menu** — roughly 350 ms every 3.5 s.
+      This is not carelessness: after `strobe(0x35)` the frame needs time to
+      leave the air. Reworking it into a state machine changes protocol
+      timing, so only with hardware to watch.
+
+- [ ] **ArduinoJson instead of assembling responses by hand.**
+
+      There is one real reason: **stop relying on nobody forgetting
+      `jsonEscape()`.** The escaping is correct today and covered by tests, but
+      it takes discipline — add a field with a string value, forget the
+      wrapper, and the response breaks silently again. It would also rule out
+      structural mistakes: a trailing comma, an unclosed quote, a missing
+      `+ ","` when inserting a field in the middle.
+
+      The cost is measured: the library is **already in the firmware**
+      (15.3 KB, pulled in by AsyncTelegram2), and converting one handler added
+      1768 bytes — a one-off price for instantiating the serialiser. The whole
+      migration should come to 2–4 KB.
+
+      What it does not give: little help with heap fragmentation.
+      `JsonDocument` allocates dynamically too, and after adding `reserve()`
+      the difference is small. Streaming straight into the socket
+      (`serializeJson(doc, server.client())`) would genuinely help, but that
+      means wrestling with `setContentLength()` and unverified `WebServer`
+      compatibility.
+
+- [ ] **Carry on splitting the `.ino` into modules.** `protocol` and `settings`
+      are out, around 930 lines remain. Candidates: `cc1101`, `web`, `display`.
+      Only code living in its own `.cpp` builds on the host, so everything
+      still inside is untestable.
+- [ ] **Extend the native tests** to the V1/V2 packet decoders, which first
+      needs the parsing extracted into pure functions with no globals
+      (`decodePacket_V1` and the V2 reply parser write straight into
+      `heaterStatus`). The infrastructure is ready: `pio test -e native`.
+- [ ] **Drop the `delay(2000)`** in display initialisation — a pure splash
+      screen that delays startup.
+- [ ] **Non-blocking `connectMQTT()`** — currently up to three attempts with
+      `delay(2000)` between them, blocking the loop for 4+ seconds.
+
+---
+
+## Interface odds and ends
+
+- [ ] **Start mDNS independently of OTA and advertise the web service.**
+      `ArduinoOTA.begin()` calls `MDNS.begin(hostname)` internally, so
+      `<deviceName>.local` already resolves — but only while the OTA toggle is
+      on, and `MDNS.enableArduino()` advertises only the development-tool
+      service, not HTTP.
+
+      A three-line change: call `MDNS.begin()` unconditionally and add
+      `MDNS.addService("http", "tcp", 80)`. The point is that the modem hands
+      out the IP over DHCP and may change it, and there is nowhere in the
+      garage to look up what it handed out. The name never changes.
+
+      Caveat: `.local` works out of the box on macOS, iOS and Windows 10+, but
+      Android support is uneven. Fine as a replacement for the IP, not as the
+      only way in.
+
+- [ ] **Frost protection.** "If the garage drops below X degrees, run for N
+      minutes." The data (`ambientTemp`) and the scheduler already exist; only
+      a threshold branch is missing. Postponed: this garage has not seen such
+      temperatures yet.
+
+- [ ] **Reshoot the web GUI screenshot for the README.** The current one
+      predates the Telegram and Timers tabs, and the README carries a note
+      saying so — remove it once the image is replaced. Needs a running device.
+
+---
+
+## Rejected (so the analysis is not repeated)
+
+| Idea | Why it was dropped |
 |---|---|
-| HTTPS на веб-морде ESP32 | ~450 строк переписывания веб-слоя, нужен свой CA на каждом устройстве. Не нужно, пока админка живёт в локальной сети |
-| Челлендж-ответ при логине | Решает перехват пароля в сети. Неактуально для локального доступа |
-| Белый IP + DDNS от МТС | Выставляет наружу веб-сервер без авторизации, имя `375xxxxxxxxx.dyndns.mts.by` тривиально перебирается. Telegram решает ту же задачу без открытых портов |
-| Managed MQTT вместо своего VPS | Актуально, только если вернёмся к MQTT. HiveMQ Cloud, регион Frankfurt, бесплатный тариф — проверить лимиты перед использованием |
-| Выпиливание кода MQTT | Полностью инертен при пустом адресе брокера, стоит ~10-15 КБ флеша. Удалять нечего ради |
-| Перевод ESP32 на питание от 12 В | Не нужно: отопитель на той же сети 220 В, что и контроллер. Свет пропадает — гаснут оба, ночного горения без присмотра не бывает |
-| Свой журнал в LittleFS | Чат с ботом уже является логом: хранится у Telegram, ищется, переживает перепрошивку |
+| HTTPS on the ESP32 web GUI | ~450 lines of rewriting the web layer plus a private CA on every client. Unnecessary while the admin page lives on the local network |
+| Challenge-response at login | Solves password interception on the wire. Irrelevant for local-only access |
+| Public IP + DDNS from MTS | Exposes a web server with no authentication, and `375xxxxxxxxx.dyndns.mts.by` is trivially enumerable. Telegram solves the same problem with no open ports |
+| Managed MQTT instead of a VPS | Only relevant if MQTT comes back. HiveMQ Cloud, Frankfurt region, free tier — check the limits before relying on it |
+| Removing the MQTT code | Completely inert with no broker address, and measured at 2.5 KB of flash. Nothing worth removing |
+| Powering the ESP32 from 12 V | Not needed: the heater runs off the same 220 V mains as the controller. When the power goes, both go — there is no unattended overnight burning |
+| A log file in LittleFS | The bot chat already is the log: stored by Telegram, searchable, and it survives a reflash |
+| Integer formatting to drop float printf | Measured: frees 624 bytes, not the 15 KB the symbol map suggested. The ESP32 core links the full newlib printf regardless |
