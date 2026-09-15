@@ -174,6 +174,15 @@ AsyncTelegram2   tgBot(tgClient);
 bool   tgReady   = false;
 String tgPending = "";     // produced before the bot became reachable
 
+// Polling interval for incoming commands. Every poll costs traffic on a
+// metered plan, and a preheat two hours ahead does not need a fast reply.
+uint16_t tgPollSec = 20;
+
+// Temporary window during which the bot answers /id to anyone, so the owner
+// can discover their own chat id without a third-party bot. Started from the
+// admin page, expires on its own.
+uint32_t tgDiscoverUntilMs = 0;
+
 // Heater
 uint32_t heaterAddress = 0x00000000;
 uint8_t packetSeq = 0;
@@ -716,6 +725,7 @@ void updateTelegram() {
     // certificate only, a stale one would need a trip to the garage.
     tgClient.setCACert(tgCaCert.length() > 0 ? tgCaCert.c_str() : telegram_cert);
     tgBot.setTelegramToken(tgTokenBuf);
+    tgBot.setUpdateTime((uint32_t)tgPollSec * 1000UL);
 
     tgReady = tgBot.begin();
     if(!tgReady) {
@@ -775,6 +785,131 @@ void updateNotifications() {
             ? "🔴 Battery low: " + String(heaterStatus.voltage / 10.0, 1) + " V"
             : "🟢 Battery recovered: " + String(heaterStatus.voltage / 10.0, 1) + " V");
     }
+}
+
+// ── Commands ───────────────────────────────────────────────────────────────
+
+static String tgStatusText() {
+    String m = "🔥 Diesel Pilot\n\n";
+
+    if(cc1101Fault) {
+        m += "RF module is not responding.\nCheck the CC1101 wiring.\n";
+        return m;
+    }
+    if(!heaterPaired) {
+        m += "Heater is not paired.\nPair it from the web GUI.\n";
+        return m;
+    }
+    if(heaterStatus.lastUpdate == 0) {
+        m += "No reply from the heater yet.\n";
+        return m;
+    }
+
+    m += "State:    " + String(getStateName(heaterStatus.state)) + "\n";
+    if(heaterStatus.autoMode) {
+        m += "Ambient:  " + String(heaterStatus.ambientTemp) + " C -> " +
+             String(heaterStatus.setpoint) + " C\n";
+    } else {
+        m += "Ambient:  " + String(heaterStatus.ambientTemp) + " C\n";
+        m += "Pump:     " + String(heaterStatus.pumpFreq / 10.0, 1) + " Hz\n";
+    }
+    m += "Case:     " + String(heaterStatus.caseTemp) + " C\n";
+    m += "Battery:  " + String(heaterStatus.voltage / 10.0, 1) + " V\n";
+    m += "Signal:   " + String(heaterStatus.rssi) + " dBm\n";
+    m += "Error:    " + String(getErrorName(heaterStatus.errorCode)) + "\n";
+    m += "Mode:     " + String(heaterStatus.autoMode ? "AUTO" : "MANUAL") + "\n";
+    m += "\nClock:    " + String(timeValid ? currentTimeString() : String("not synced"));
+    return m;
+}
+
+static void tgSendStatus(int64_t chatId) {
+    InlineKeyboard kb;
+    kb.addButton("🔥 On",   "on", KeyboardButtonQuery);
+    kb.addButton("❄️ Off",  "off", KeyboardButtonQuery);
+    kb.addButton("🔄",      "st", KeyboardButtonQuery);
+    kb.addRow();
+    kb.addButton("− 1",     "dn", KeyboardButtonQuery);
+    kb.addButton("+ 1",     "up", KeyboardButtonQuery);
+    kb.addButton("⚙️ Mode", "md", KeyboardButtonQuery);
+    tgBot.sendTo(chatId, tgStatusText(), kb.getJSON());
+}
+
+static void tgHandleCommand(int64_t chatId, const String& cmd) {
+    if(cmd == "st" || cmd == "/status" || cmd == "/start") {
+        tgSendStatus(chatId);
+        return;
+    }
+
+    if(cmd == "/id") {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%lld", (long long)chatId);
+        tgBot.sendTo(chatId, "Your chat id: " + String(buf));
+        return;
+    }
+
+    if(cmd == "/help") {
+        tgBot.sendTo(chatId,
+            "/status - current readings and buttons\n"
+            "/on - start the heater\n"
+            "/off - stop it (a purge follows)\n"
+            "/id - show your chat id");
+        return;
+    }
+
+    if(!heaterPaired) {
+        tgBot.sendTo(chatId, "Heater is not paired.");
+        return;
+    }
+
+    if(cmd == "on" || cmd == "/on") {
+        tgBot.sendTo(chatId, heaterEnsureOn()
+            ? "🔥 Ignition requested"
+            : "Heater is already running or still purging");
+    } else if(cmd == "off" || cmd == "/off") {
+        tgBot.sendTo(chatId, heaterEnsureOff()
+            ? "❄️ Shutdown requested, the purge will follow"
+            : "Heater is already off or stopping");
+    } else if(cmd == "up") {
+        sendCommand(CMD_UP);
+        tgSendStatus(chatId);
+    } else if(cmd == "dn") {
+        sendCommand(CMD_DOWN);
+        tgSendStatus(chatId);
+    } else if(cmd == "md") {
+        sendCommand(CMD_MODE);
+        tgSendStatus(chatId);
+    }
+}
+
+// Polls for incoming messages. Runs only once the bot is up, so a dead link
+// costs nothing here -- reconnection is updateTelegram()'s job.
+void updateTelegramCommands() {
+    if(!tgEnabled || !tgReady) return;
+
+    TBMessage msg;
+    if(tgBot.getNewMessage(msg) == MessageNoData) return;
+
+    String text = (msg.messageType == MessageQuery) ? msg.callbackQueryData : msg.text;
+    text.trim();
+
+    // The whitelist is the only gate between a stranger and the heater:
+    // anyone can find a bot by name and write to it. Unknown senders get
+    // silence rather than a refusal -- no reason to confirm anything exists.
+    if(!isChatAllowed(std::string(tgChats.c_str()), msg.chatId)) {
+        bool discovering = tgDiscoverUntilMs != 0 &&
+                           (int32_t)(tgDiscoverUntilMs - millis()) > 0;
+        // While no chat is configured the device is inert anyway, and this is
+        // the only way to learn your own id without a third-party bot.
+        if(text == "/id" && (discovering || tgChats.length() == 0)) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", (long long)msg.chatId);
+            tgBot.sendTo(msg.chatId, "Your chat id: " + String(buf));
+        }
+        return;
+    }
+
+    if(msg.messageType == MessageQuery) tgBot.endQuery(msg, "");
+    tgHandleCommand(msg.chatId, text);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1231,11 +1366,13 @@ void handleAPI_Telegram() {
     tgToken   = formField("token", tgToken);
     tgChats   = formField("chats", tgChats);
     tgCaCert  = formField("caCert", tgCaCert);
+    tgPollSec = formNumber("pollSec", tgPollSec, 5, 300);
 
     prefs.putBool("tgEnabled", tgEnabled);
     prefs.putString("tgToken", tgToken);
     prefs.putString("tgChats", tgChats);
     prefs.putString("tgCaCert", tgCaCert);
+    prefs.putUShort("tgPollSec", tgPollSec);
 
     // Reboot rather than reconfigure in place: both the bot and the TLS
     // client hold raw pointers into the strings handed to them, and a
@@ -1251,9 +1388,21 @@ void handleAPI_TelegramStatus() {
     json += "\"tokenSet\":" + String(tgToken.length() > 0 ? "true" : "false") + ",";
     json += "\"customCa\":" + String(tgCaCert.length() > 0 ? "true" : "false") + ",";
     json += "\"connected\":" + String(tgReady ? "true" : "false") + ",";
+    json += "\"pollSec\":" + String(tgPollSec) + ",";
+    json += "\"discovering\":" + String(
+        (tgDiscoverUntilMs != 0 && (int32_t)(tgDiscoverUntilMs - millis()) > 0)
+            ? "true" : "false") + ",";
     json += "\"chats\":\"" + tgChats + "\"";
     json += "}";
     server.send(200, "application/json", json);
+}
+
+// Opens a short window during which the bot answers /id to anyone, so the
+// owner can discover their chat id without trusting a third-party bot.
+// Time-limited on purpose: a permanent one would be a standing invitation.
+void handleAPI_TelegramDiscover() {
+    tgDiscoverUntilMs = millis() + 5UL * 60UL * 1000UL;
+    server.send(200, "text/plain", "Write /id to the bot within 5 minutes");
 }
 
 void handleAPI_TelegramTest() {
@@ -1354,6 +1503,7 @@ void setup() {
     tgToken   = prefs.getString("tgToken", "");
     tgChats   = prefs.getString("tgChats", "");
     tgCaCert  = prefs.getString("tgCaCert", "");
+    tgPollSec = prefs.getUShort("tgPollSec", 20);
 
     if(heaterVersion == "V1") {
         if(prefs.getBytes("addrV1", myAddrV1, 3) != 3) {
@@ -1421,6 +1571,7 @@ void setup() {
     server.on("/api/telegram",       handleAPI_Telegram);
     server.on("/api/telegram/status",handleAPI_TelegramStatus);
     server.on("/api/telegram/test",  handleAPI_TelegramTest);
+    server.on("/api/telegram/discover", handleAPI_TelegramDiscover);
     server.on("/api/timers",       handleAPI_Timers);
     server.on("/api/timers/status",handleAPI_TimerStatus);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
@@ -1465,6 +1616,7 @@ void loop() {
     superviseWiFi();
     updateTimeSync();
     updateTelegram();
+    updateTelegramCommands();
     updateNotifications();
     updateScheduler();
     server.handleClient();
