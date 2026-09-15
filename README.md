@@ -10,6 +10,10 @@ reliability and a test suite. See [What this fork changes](#what-this-fork-chang
 
 > ⚠️ Use at your own risk. This drives a device that burns fuel unattended.
 
+<img width="874" height="730" alt="Web GUI" src="https://github.com/user-attachments/assets/a3715ef1-9ef1-4257-a28f-77bb7ff2645d" />
+
+*Screenshot predates the Telegram and Timers tabs.*
+
 ---
 
 ## What this fork changes
