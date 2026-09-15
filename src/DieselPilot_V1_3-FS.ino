@@ -94,6 +94,8 @@
 // After any command, poll fast for a while so the result appears without
 // waiting out the idle interval.
 #define HEATER_POLL_BOOST_MS 60000
+// Beyond this the last reading is history, not the current state.
+#define HEATER_DATA_FRESH_MS 20000
 
 // Telegram polls fast while someone is pressing buttons and slowly otherwise.
 // A fixed rate has to choose between a sluggish keyboard and wasted data.
@@ -231,6 +233,12 @@ uint32_t lastTgActivityMs    = 0;
 // away. The minimum free heap is the one that matters: a slow leak or heap
 // fragmentation shows up there long before anything visibly breaks.
 uint32_t loopMaxMs = 0;
+
+// Ignition verification. Set when a start is commanded, cleared once the
+// heater acknowledges by leaving OFF -- or once it has clearly failed to.
+bool     ignWatching      = false;
+uint8_t  ignAttempts      = 0;
+uint32_t ignCommandedAtMs = 0;
 
 // V2 pairing runs as a state machine in loop() rather than blocking the
 // request handler for a minute.
@@ -699,6 +707,9 @@ static uint32_t heaterPollIntervalMs() {
 bool heaterEnsureOff() {
     if(!heaterPaired) return false;
     if(heaterIsOffOrStopping(heaterStatus.state)) return false;
+    // A stop cancels any ignition still being verified, otherwise the retry
+    // would fight the shutdown that was just ordered.
+    ignWatching = false;
     sendCommand(CMD_POWER);
     return true;
 }
@@ -709,6 +720,9 @@ bool heaterEnsureOn() {
     // on these units, and the command would simply be lost.
     if(heaterStatus.state != STATE_OFF) return false;
     sendCommand(CMD_POWER);
+    ignWatching      = true;
+    ignAttempts      = 1;
+    ignCommandedAtMs = millis();
     return true;
 }
 
@@ -1029,6 +1043,51 @@ void updateTelegramPollRate() {
     if(want == tgCurrentPollMs) return;
     tgCurrentPollMs = want;
     tgBot.setUpdateTime(want);
+}
+
+// Verifies that a commanded start actually lit the heater. Without this the
+// command went out over the air and was forgotten, so a failure to ignite
+// stayed silent until somebody arrived to a cold garage.
+void updateIgnition() {
+    if(!ignWatching) return;
+
+    // Nothing can be judged, retried or reported through a dead radio.
+    if(cc1101Fault) { ignWatching = false; return; }
+
+    IgnitionInput in;
+    in.watching      = ignWatching;
+    in.attempts      = ignAttempts;
+    in.nowMs         = millis();
+    in.commandedAtMs = ignCommandedAtMs;
+    in.heaterState   = heaterStatus.state;
+    in.dataFresh     = heaterStatus.lastUpdate != 0 &&
+                       (millis() - heaterStatus.lastUpdate) < HEATER_DATA_FRESH_MS;
+    in.timeoutMs     = IGNITION_TIMEOUT_MS;
+    in.maxAttempts   = IGNITION_MAX_TRIES;
+
+    switch(checkIgnition(in)) {
+        case IGN_CONFIRMED:
+            // Silent on success: the state change is announced anyway.
+            ignWatching = false;
+            break;
+
+        case IGN_RETRY:
+            ignAttempts++;
+            ignCommandedAtMs = millis();
+            sendCommand(CMD_POWER);
+            notifyTelegram("🟡 Heater did not light, trying once more");
+            break;
+
+        case IGN_FAILED:
+            ignWatching = false;
+            notifyTelegram("🔴 Heater failed to start — no acknowledgement "
+                           "after " + String(ignAttempts) + " attempts");
+            break;
+
+        case IGN_NONE:
+        default:
+            break;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1890,6 +1949,7 @@ void loop() {
     if(millis() - lastSlowTick >= 1000) {
         lastSlowTick = millis();
         updateTelegramPollRate();
+        updateIgnition();
         updateNotifications();
         updateScheduler();
     }

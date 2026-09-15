@@ -83,3 +83,41 @@ bool heaterIsOffOrStopping(uint8_t state);
 bool inDayWindow(int now, int start, int end);
 
 SchedulerDecision decideShutdown(const SchedulerInput& in);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IGNITION
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Shutdown is watched all the way to OFF and raises an alarm if it never gets
+// there. Starting had no such check at all: the command went out over the air
+// and was forgotten, so a heater that failed to light said nothing until
+// somebody arrived to a cold garage. This closes that asymmetry.
+
+// How long one attempt is given before it counts as failed, and how many
+// attempts are made. State is polled every 3 s while a command is recent,
+// so the timeout covers roughly ten readings.
+#define IGNITION_TIMEOUT_MS  30000
+#define IGNITION_MAX_TRIES   2
+
+enum IgnitionAction {
+    IGN_NONE = 0,       // still within the window, or not watching
+    IGN_CONFIRMED,      // the heater left OFF, it is lighting
+    IGN_RETRY,          // send the command once more
+    IGN_FAILED,         // give up and raise the alarm
+};
+
+struct IgnitionInput {
+    bool     watching;        // a start was commanded and is being verified
+    uint8_t  attempts;        // commands sent so far, 1 after the first
+    uint32_t nowMs;
+    uint32_t commandedAtMs;
+    uint8_t  heaterState;
+    // False when the heater has not been heard from recently. Retrying blind
+    // is the dangerous case: the command is a toggle, so re-sending it to a
+    // heater that did light would switch it back off.
+    bool     dataFresh;
+    uint32_t timeoutMs;
+    uint8_t  maxAttempts;
+};
+
+IgnitionAction checkIgnition(const IgnitionInput& in);

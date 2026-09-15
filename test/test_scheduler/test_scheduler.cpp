@@ -214,6 +214,83 @@ void test_day_window_basics(void) {
     TEST_ASSERT_FALSE(inDayWindow(100, 100, 100));  // empty window
 }
 
+
+// -- Ignition --──────────────────────────────────────────────────────────────
+
+static const uint32_t SEC = 1000UL;
+
+// A start was commanded a moment ago and the heater has not answered yet.
+static IgnitionInput baseIgnition(void) {
+    IgnitionInput in;
+    in.watching      = true;
+    in.attempts      = 1;
+    in.nowMs         = 1000 * MIN;
+    in.commandedAtMs = 1000 * MIN;
+    in.heaterState   = STATE_OFF;
+    in.dataFresh     = true;
+    in.timeoutMs     = IGNITION_TIMEOUT_MS;
+    in.maxAttempts   = IGNITION_MAX_TRIES;
+    return in;
+}
+
+void test_ignition_not_watching_is_silent(void) {
+    IgnitionInput in = baseIgnition();
+    in.watching = false;
+    in.nowMs    = in.commandedAtMs + 10 * MIN;
+    TEST_ASSERT_EQUAL(IGN_NONE, checkIgnition(in));
+}
+
+void test_ignition_confirmed_when_the_heater_leaves_off(void) {
+    IgnitionInput in = baseIgnition();
+    in.heaterState = STATE_STARTUP;
+    TEST_ASSERT_EQUAL(IGN_CONFIRMED, checkIgnition(in));
+}
+
+void test_ignition_waits_out_the_window(void) {
+    IgnitionInput in = baseIgnition();
+    in.nowMs = in.commandedAtMs + 29 * SEC;
+    TEST_ASSERT_EQUAL(IGN_NONE, checkIgnition(in));
+}
+
+void test_ignition_retries_once_the_window_passes(void) {
+    IgnitionInput in = baseIgnition();
+    in.nowMs = in.commandedAtMs + 31 * SEC;
+    TEST_ASSERT_EQUAL(IGN_RETRY, checkIgnition(in));
+}
+
+void test_ignition_fails_after_the_last_attempt(void) {
+    IgnitionInput in = baseIgnition();
+    in.attempts = IGNITION_MAX_TRIES;
+    in.nowMs    = in.commandedAtMs + 31 * SEC;
+    TEST_ASSERT_EQUAL(IGN_FAILED, checkIgnition(in));
+}
+
+// The command is a toggle. Re-sending it to a heater that did light but was
+// not heard would switch it back off -- the exact opposite of the intent.
+void test_ignition_never_retries_on_stale_data(void) {
+    IgnitionInput in = baseIgnition();
+    in.dataFresh = false;
+    in.nowMs     = in.commandedAtMs + 31 * SEC;
+    TEST_ASSERT_EQUAL(IGN_FAILED, checkIgnition(in));
+}
+
+// A stale reading showing RUNNING is the previous state, not proof that this
+// command worked.
+void test_ignition_does_not_confirm_on_stale_data(void) {
+    IgnitionInput in = baseIgnition();
+    in.heaterState = STATE_RUNNING;
+    in.dataFresh   = false;
+    TEST_ASSERT_EQUAL(IGN_NONE, checkIgnition(in));
+}
+
+// Whatever the reason it left OFF, there is nothing left to verify.
+void test_ignition_confirmed_even_if_someone_else_started_it(void) {
+    IgnitionInput in = baseIgnition();
+    in.heaterState = STATE_RUNNING;
+    in.nowMs       = in.commandedAtMs + 5 * MIN;
+    TEST_ASSERT_EQUAL(IGN_CONFIRMED, checkIgnition(in));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -239,6 +316,15 @@ int main(int, char**) {
     RUN_TEST(test_purge_is_not_declared_overrun_too_early);
 
     RUN_TEST(test_off_or_stopping_covers_the_whole_shutdown_path);
+    RUN_TEST(test_ignition_not_watching_is_silent);
+    RUN_TEST(test_ignition_confirmed_when_the_heater_leaves_off);
+    RUN_TEST(test_ignition_waits_out_the_window);
+    RUN_TEST(test_ignition_retries_once_the_window_passes);
+    RUN_TEST(test_ignition_fails_after_the_last_attempt);
+    RUN_TEST(test_ignition_never_retries_on_stale_data);
+    RUN_TEST(test_ignition_does_not_confirm_on_stale_data);
+    RUN_TEST(test_ignition_confirmed_even_if_someone_else_started_it);
+
     RUN_TEST(test_day_window_basics);
 
     return UNITY_END();

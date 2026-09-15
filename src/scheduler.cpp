@@ -69,3 +69,23 @@ SchedulerDecision decideShutdown(const SchedulerInput& in) {
 
     return none;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IGNITION
+// ═══════════════════════════════════════════════════════════════════════════
+
+IgnitionAction checkIgnition(const IgnitionInput& in) {
+    if(!in.watching) return IGN_NONE;
+
+    // Leaving OFF is the heater acknowledging the command. Only trust it
+    // against a fresh reading -- a stale one is the previous state, not proof.
+    if(in.heaterState != STATE_OFF && in.dataFresh) return IGN_CONFIRMED;
+
+    if(in.nowMs - in.commandedAtMs < in.timeoutMs) return IGN_NONE;
+
+    // Without fresh data there is nothing to retry against: the heater may
+    // well be running and simply unheard, and the command is a toggle.
+    if(in.attempts < in.maxAttempts && in.dataFresh) return IGN_RETRY;
+
+    return IGN_FAILED;
+}
