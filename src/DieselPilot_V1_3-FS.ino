@@ -201,6 +201,15 @@ uint32_t startTarget = 0;
 // way to change it at all. Zero means "use the configured default".
 uint16_t sessionAutoOffMin = 0;
 
+// Fuel used in the current burn. Accumulated once a second from the pump rate
+// and reset when the heater reaches OFF, so it answers "how much did this
+// preheat cost" rather than tracking a lifetime total.
+//
+// For V1 the figure is rough: that decoder derives pumpFreq from the power
+// level rather than reading a real rate.
+uint32_t fuelTicks  = 0;
+uint16_t fuelDoseUl = FUEL_DOSE_UL_DEFAULT;
+
 // Telegram. The bot is the only remote channel, so the chat whitelist is the
 // single thing standing between a stranger and the heater.
 bool   tgEnabled = false;
@@ -950,6 +959,9 @@ static String tgStatusText() {
     m += "Signal:   " + String(heaterStatus.rssi) + " dBm\n";
     m += "Error:    " + String(getErrorName(heaterStatus.errorCode)) + "\n";
     m += "Mode:     " + String(heaterStatus.autoMode ? "AUTO" : "MANUAL") + "\n";
+    if(fuelTicks) {
+        m += "Fuel:     ~" + String(fuelMlFromTicks(fuelTicks)) + " ml this burn\n";
+    }
     uint32_t age = (millis() - heaterStatus.lastUpdate) / 1000;
     m += "\nUpdated:  " + String(age) + " s ago";
     if(age > 30) m += "  (stale)";
@@ -1125,6 +1137,22 @@ void updateTelegramPollRate() {
 // Verifies that a commanded start actually lit the heater. Without this the
 // command went out over the air and was forgotten, so a failure to ignite
 // stayed silent until somebody arrived to a cold garage.
+// Integrates the pump rate once a second. Stale readings are skipped: the
+// last known rate is not evidence the pump is still running at it.
+void updateFuel() {
+    static uint8_t lastState = STATE_OFF;
+
+    bool fresh = heaterStatus.lastUpdate != 0 &&
+                 (millis() - heaterStatus.lastUpdate) < HEATER_DATA_FRESH_MS;
+
+    if(heaterStatus.state == STATE_OFF) {
+        if(lastState != STATE_OFF) fuelTicks = 0;   // new burn starts at zero
+    } else if(fresh) {
+        fuelTicks += fuelTickPerSecond(fuelDoseUl, heaterStatus.pumpFreq);
+    }
+    lastState = heaterStatus.state;
+}
+
 void updateIgnition() {
     if(!ignWatching) return;
 
@@ -1588,6 +1616,7 @@ void handleAPI_Status() {
     // with a dead CC1101 these readings can be hours old and look live.
     // Cast before the ternary: the other branch is unsigned, and -1 would be
     // converted to 4294967295 instead of staying the "never heard" marker.
+    json += "\"fuelMl\":" + String(fuelMlFromTicks(fuelTicks)) + ",";
     json += "\"ageSec\":" + String(heaterStatus.lastUpdate
                 ? (long)((millis() - heaterStatus.lastUpdate) / 1000) : -1L);
     json += "}";
@@ -1750,6 +1779,7 @@ void handleAPI_Timers() {
     blackoutMinutes     = formNumber("blackout", blackoutMinutes, 0, 1439);
     shutdownLeadMin     = formNumber("lead", shutdownLeadMin, 1, 240);
     cooldownExpectedMin = formNumber("cooldown", cooldownExpectedMin, 1, 60);
+    fuelDoseUl          = formNumber("fuelDose", fuelDoseUl, 5, 60);
 
     prefs.putString("ntpServer", ntpServer);
     prefs.putInt("tzOffsetMin", tzOffsetMin);
@@ -1758,6 +1788,7 @@ void handleAPI_Timers() {
     prefs.putInt("blackoutMin", blackoutMinutes);
     prefs.putUShort("shutdownLead", shutdownLeadMin);
     prefs.putUShort("cooldownMin", cooldownExpectedMin);
+    prefs.putUShort("fuelDoseUl", fuelDoseUl);
 
     setupTime();   // pick up a changed server or offset immediately
     server.send(200, "text/plain", "Timers saved!");
@@ -1794,6 +1825,7 @@ void handleAPI_TimerStatus() {
     json += "\"blackout\":" + String(blackoutMinutes) + ",";
     json += "\"lead\":" + String(shutdownLeadMin) + ",";
     json += "\"cooldown\":" + String(cooldownExpectedMin) + ",";
+    json += "\"fuelDose\":" + String(fuelDoseUl) + ",";
     json += "\"startArmed\":" + String(startArmed ? "true" : "false") + ",";
     json += "\"startAt\":\"" + (startArmed ? clockOfPublic(startTarget) : String("")) + "\"";
     json += "}";
@@ -2016,6 +2048,7 @@ void setup() {
     cooldownExpectedMin = prefs.getUShort("cooldownMin", 5);
     startArmed          = prefs.getBool("startArmed", false);
     startTarget         = prefs.getULong("startAt", 0);
+    fuelDoseUl          = prefs.getUShort("fuelDoseUl", FUEL_DOSE_UL_DEFAULT);
     // Telegram
     tgEnabled = prefs.getBool("tgEnabled", false);
     tgToken   = prefs.getString("tgToken", "");
@@ -2169,6 +2202,7 @@ void loop() {
     if(millis() - lastSlowTick >= 1000) {
         lastSlowTick = millis();
         updateTelegramPollRate();
+        updateFuel();
         updateIgnition();
         updateScheduledStart();
         updateNotifications();

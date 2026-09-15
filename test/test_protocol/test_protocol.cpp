@@ -128,6 +128,53 @@ void test_error_none_and_on_are_both_normal(void) {
     TEST_ASSERT_EQUAL_STRING("NORMAL", getErrorName(ERR_ON));
 }
 
+
+// -- Fuel --─────────────────────────────────────────────────────────────────
+
+// Reference from the heater documentation: 0.022 ml per stroke at 2.4 Hz
+// works out to 0.19 l/h. One hour of accumulation must land on 190 ml.
+void test_fuel_reference_hour_at_2_4_hz(void) {
+    uint32_t ticks = 0;
+    for(int sec = 0; sec < 3600; sec++) ticks += fuelTickPerSecond(22, 24);
+    TEST_ASSERT_EQUAL_UINT32(190, fuelMlFromTicks(ticks));
+}
+
+// The other published figure: 0.022 ml at 5 Hz is 0.396 l/h.
+void test_fuel_reference_hour_at_5_hz(void) {
+    uint32_t ticks = 0;
+    for(int sec = 0; sec < 3600; sec++) ticks += fuelTickPerSecond(22, 50);
+    TEST_ASSERT_EQUAL_UINT32(396, fuelMlFromTicks(ticks));
+}
+
+void test_fuel_scales_with_the_pump_rate(void) {
+    TEST_ASSERT_EQUAL_UINT32(2 * fuelTickPerSecond(22, 20),
+                                 fuelTickPerSecond(22, 40));
+}
+
+void test_fuel_is_zero_while_the_pump_is_idle(void) {
+    TEST_ASSERT_EQUAL_UINT32(0, fuelTickPerSecond(22, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, fuelMlFromTicks(0));
+}
+
+// Pumps differ, so the dose is a setting rather than a constant.
+void test_fuel_honours_a_different_dose(void) {
+    uint32_t a = 0, b = 0;
+    for(int sec = 0; sec < 3600; sec++) {
+        a += fuelTickPerSecond(20, 24);
+        b += fuelTickPerSecond(23, 24);
+    }
+    TEST_ASSERT_EQUAL_UINT32(172, fuelMlFromTicks(a));
+    TEST_ASSERT_EQUAL_UINT32(198, fuelMlFromTicks(b));
+}
+
+// The accumulator is session-scoped, but confirm the headroom: at the highest
+// realistic rate it must not wrap during any plausible burn.
+void test_fuel_accumulator_has_headroom(void) {
+    uint32_t perSec = fuelTickPerSecond(23, 55);        // worst realistic case
+    uint32_t week   = perSec * 7UL * 24UL * 3600UL;
+    TEST_ASSERT_TRUE(week / perSec == 7UL * 24UL * 3600UL);   // no wrap
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -146,6 +193,13 @@ int main(int, char**) {
     RUN_TEST(test_rssi_sign_boundary);
     RUN_TEST(test_rssi_truncation_at_the_top);
     RUN_TEST(test_rssi_stays_in_a_plausible_range);
+
+    RUN_TEST(test_fuel_reference_hour_at_2_4_hz);
+    RUN_TEST(test_fuel_reference_hour_at_5_hz);
+    RUN_TEST(test_fuel_scales_with_the_pump_rate);
+    RUN_TEST(test_fuel_is_zero_while_the_pump_is_idle);
+    RUN_TEST(test_fuel_honours_a_different_dose);
+    RUN_TEST(test_fuel_accumulator_has_headroom);
 
     RUN_TEST(test_state_names);
     RUN_TEST(test_error_names);

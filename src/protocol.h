@@ -70,6 +70,27 @@ uint32_t registersToFreq(uint32_t regs);
 int rssiFromRaw(uint8_t raw);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// FUEL
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Consumption follows directly from the pump: each stroke doses a fixed
+// volume, so litres per hour = dose (ml) x frequency (Hz) x 3.6. Most pumps
+// on these heaters dose 0.020-0.023 ml and run between 1.4 and 5.5 Hz.
+//
+// Everything is integer to keep the floating-point printf machinery out of
+// it. One tick of the accumulator is 0.1 microlitre: adding
+// doseUl x pumpFreqTenths once a second gives dose x Hz microlitres per
+// second, scaled by ten.
+
+#define FUEL_DOSE_UL_DEFAULT 22
+
+// One second's worth of accumulator ticks at the given pump rate.
+uint32_t fuelTickPerSecond(uint16_t doseUl, uint16_t pumpFreqTenths);
+
+// Accumulated ticks converted to millilitres.
+uint32_t fuelMlFromTicks(uint32_t ticks);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CRC-16/MODBUS
 // ═══════════════════════════════════════════════════════════════════════════
 
