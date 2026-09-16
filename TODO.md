@@ -24,18 +24,20 @@ hanging in the garage it costs a hundred-kilometre drive.
       | | `default.csv` | `min_spiffs.csv` |
       |---|---|---|
       | App slot | 1 310 720 B | 1 966 080 B |
-      | Used | 84.9% | **56.6%** |
-      | Free | 198 KB | **834 KB** |
-      | Filesystem | 1.375 MB | 128 KB, 53 KB used |
+      | Used | 87.2% | **58.1%** |
+      | Free | 164 KB | **804 KB** |
+      | Filesystem | 1.375 MB | 128 KB, 54 KB used |
 
       Nothing has to be rewritten. For comparison, every other flash saving
       available comes to maybe 30 KB in total, and each costs something we
       want: mDNS is 23 KB but arrives with OTA, the whole of PubSubClient is
       2.5 KB, and stripping float formatting was measured at 624 bytes.
 
-      Headroom afterwards: `index.html` grew from 744 to about 1150 lines in
-      one session. At 80 KB it still fits in 128, but the margin narrows —
-      serving it gzipped would take 53 KB down to roughly 12.
+      The app slot is the side that has been filling up: 84.9% when this was
+      first measured, 87.2% after the counters, the stepper and the tank. The
+      filesystem has not moved anything like as fast — `index.html` grew from
+      744 to around 1200 lines and 54 KB, still inside 128 KB — so the imbalance
+      the switch fixes only gets worse the longer it waits.
 
 ---
 
@@ -49,6 +51,16 @@ hanging in the garage it costs a hundred-kilometre drive.
       430 MB/month if every poll does a TLS handshake.
 - [ ] **How long a TLS handshake actually takes** on a poor link — needed to
       pick the watchdog timeout.
+- [ ] **Which protocol version this heater actually speaks**, and how its
+      power ladder behaves. `/level` walks V1 straight to the level, because
+      the V1 frame carries it. The V2 frame has no level number at all, only
+      the pump rate, so the walk descends to the bottom of the ladder and
+      climbs from there. Two things need watching: whether the ladder stops at
+      its ends or wraps round (the stepper detects a wrap and gives up rather
+      than circling, but it has never seen one), and whether `STEP_SETTLE_MS`
+      — two poll intervals — is long enough for a step to show up in the
+      reading.
+
 - [ ] **The display's I2C address.** U8g2 defaults to 0x3C. If the module is
       strapped to 0x3D it needs `display.setI2CAddress(0x3D * 2)`.
 - [ ] **Whether MTS hands out a public IP.** `curl -4 ifconfig.me` against the
@@ -59,15 +71,13 @@ hanging in the garage it costs a hundred-kilometre drive.
 
 ## Monitoring
 
-- [ ] **Survive the overnight power cut.** All RAM state is lost every night at
-      22:00: the error history, the minimum free heap, the longest loop
-      iteration, and whether the heater was burning when the power went. An
-      error at 21:50 leaves no trace by morning.
-
-      Persist the last few errors and a "was running at power loss" flag to
-      NVS, writing only on change to avoid wearing the flash. It would also
-      give a morning notification along the lines of "last night's shutdown
-      was not clean".
+- [ ] **Persist the heap and loop figures too.** The counters, the error log
+      and the ignition log now survive the night; the diagnostics do not. The
+      minimum free heap since boot and the longest loop iteration still reset
+      at 22:00, which is precisely what makes a slow leak invisible — every
+      night hands back a clean slate. Decide first whether a per-night figure
+      is worth storing at all, or whether a running worst-case since the last
+      flash is the more useful number.
 
 - [ ] **Read the diagnostics off a running device and decide what to do with
       them.** `/api/info` and the bot's status now carry free heap, minimum
@@ -188,7 +198,9 @@ hanging in the garage it costs a hundred-kilometre drive.
       compatibility.
 
 - [ ] **Carry on splitting the `.ino` into modules.** `protocol` and `settings`
-      are out, around 930 lines remain. Candidates: `cc1101`, `web`, `display`.
+      are out, and so are `stepper` and `stats`, but the `.ino` has grown to
+      around 3200 lines rather than shrunk. Candidates: `cc1101`, `web`,
+      `display`, and the Telegram command handling.
       Only code living in its own `.cpp` builds on the host, so everything
       still inside is untestable.
 - [ ] **Extend the native tests** to the V1/V2 packet decoders, which first
@@ -242,3 +254,8 @@ hanging in the garage it costs a hundred-kilometre drive.
 | Powering the ESP32 from 12 V | Not needed: the heater runs off the same 220 V mains as the controller. When the power goes, both go — there is no unattended overnight burning |
 | A log file in LittleFS | The bot chat already is the log: stored by Telegram, searchable, and it survives a reflash |
 | Integer formatting to drop float printf | Measured: frees 624 bytes, not the 15 KB the symbol map suggested. The ESP32 core links the full newlib printf regardless |
+| Preheat timed to arrival rather than to a start time | "Be warm by 18:00" needs a model of how fast the garage heats, and that depends on the outside temperature, which the controller cannot see. The measured rate from one burn does not carry to the next |
+| Thermostat: stop once the garage reaches N degrees | The heater is not powerful enough to overshoot this garage, so the cut-off would never fire. The runtime limit already covers the case it was meant for |
+| Warning on a rising case temperature | Meant to catch a blocked duct before the heater faults on it. The heater reports `OVERHEAT` itself, and at this output a real runaway is unlikely enough not to be worth the false alarms |
+| Counting mobile data on the device | The operator already meters it, and their figure is the one that decides whether the plan runs out |
+| Settings backup and restore through the GUI | Would save retyping the token and Wi-Fi after a factory reset or a board swap. Rare enough to do by hand, and a file holding the bot token is a new thing to look after |

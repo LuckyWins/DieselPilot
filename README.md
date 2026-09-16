@@ -22,12 +22,15 @@ reliability and a test suite. See [What this fork changes](#what-this-fork-chang
 |---|---|---|
 | Remote control | MQTT, or the web GUI exposed to the internet | Telegram bot over an outbound connection — works behind CGNAT, opens no ports |
 | Display driver | SH1106 | SSD1306, which also covers SSD1315 |
-| Unattended safety | — | Runtime limit and a shutdown deadline before scheduled power cuts |
+| Unattended safety | — | Runtime limit, a shutdown deadline before scheduled power cuts, and a refusal to light what cannot finish before one |
+| Maintenance | — | Hours, fuel, starts and ignition quality, tracked against the last service |
+| Fuel | — | Consumption integrated from the pump, and what is left in the tank |
+| State across reboots | — | Counters, error log and ignition log in NVS, so the nightly power cut costs nothing |
 | Hang protection | — | Task watchdog, bounded CC1101 SPI waits, module self-test |
 | Network recovery | Connect once at boot | Supervised Wi-Fi with exponential backoff |
 | Settings forms | A blank field erased the stored value | Blank keeps, `__CLEAR__` erases |
 | Web API | Open to any cross-origin request | Mutating endpoints require a custom header and POST |
-| Tests | None | 62 host-side cases, no hardware needed |
+| Tests | None | 170 host-side cases, no hardware needed |
 
 MQTT is still in the firmware and still works; it is simply inert until a
 broker address is set. It remains the path to Home Assistant.
@@ -57,23 +60,45 @@ More detail, including manual pairing, lives on the
 **Control**
 - Web GUI with a dark theme, served from LittleFS — local network only
 - Telegram bot with an inline keyboard: on, off, step up, step down, mode
-- Explicit on/off rather than the protocol's bare power toggle
+- Explicit on/off rather than the protocol's bare power toggle, on both paths
+- Set a power level or a target temperature in one command, instead of
+  pressing ±1 and waiting out a poll after each
+- Scheduled start, by clock time or after a delay
 - Automatic and manual pairing (V1 and V2 protocols)
 
 **Unattended operation**
 - Runtime limit: stop the heater after N minutes
 - Shutdown deadline: stop it early enough before a scheduled power cut for the
   purge cycle to finish
+- A start that would be stopped again within minutes is refused outright,
+  whether it comes from the chat, the web GUI or the schedule
+- Ignition is verified rather than assumed: a command that did not light the
+  heater is retried, then reported
 - Task watchdog, plus bounded SPI waits so an unplugged CC1101 cannot hang the
   controller during boot
 - Wi-Fi supervision with exponential backoff
 - CC1101 presence check via the VERSION register
 
 **Monitoring**
-- Telegram notifications: heater faults, state changes, flat battery, silent
-  RF module, scheduled shutdowns, and a boot notice carrying the reset reason
+- Telegram notifications: heater faults, state changes, a sagging supply,
+  silent RF module, scheduled shutdowns, failed ignitions, and a boot notice
+  carrying the reset reason
+- Progress reports while it burns, which turn into a warning when the garage
+  is not actually warming up
+- A notice in the morning when the power went while the heater was still lit
 - OLED display with status and IP
-- Error code decoding (BYTE[7])
+- Error code decoding (BYTE[7]), logged to NVS with absolute timestamps
+
+**Fuel and wear**
+- Consumption integrated from the pump rate, per burn and over the device's
+  life
+- Optionally, what is left in the tank, by dead reckoning — no sensor — with
+  warnings at a quarter and a tenth, and a word before a burn the tank will
+  not cover
+- Hours, fuel and starts since the last service, with an optional reminder
+- Ignition quality tracked over time: how long a start takes and how far the
+  glow plug drags the supply down, compared against the same burner when it
+  was last cleaned
 
 **Plumbing**
 - MQTT with Home Assistant integration (inert until configured)
@@ -128,7 +153,9 @@ src/
   DieselPilot_V1_3-FS.ino   firmware: hardware, web server, Telegram, loop
   protocol.{h,cpp}          CRC-16, frequency maths, state and error decoders
   settings.{h,cpp}          settings form parsing
-  scheduler.{h,cpp}         shutdown timers
+  scheduler.{h,cpp}         shutdown timers, ignition and start decisions
+  stepper.{h,cpp}           walking the power level to a requested value
+  stats.{h,cpp}             persistent counters, ring buffers, ignition trend
   notify.{h,cpp}            chat whitelist, repeat suppression, backoff
 data/index.html             web GUI (uploaded to LittleFS)
 test/                       host-side unit tests
@@ -251,7 +278,24 @@ public IP, no port forwarding and no broker.
 bot by its name and message it, so only the listed chat ids are obeyed;
 everything else is ignored in silence. An empty list allows nobody.
 
-Commands: `/status`, `/on`, `/off`, `/id`, `/help`, plus the inline keyboard.
+Commands, plus the inline keyboard:
+
+| Command | What it does |
+|---|---|
+| `/status` | Readings, and the buttons |
+| `/on`, `/off` | Start, or stop with the purge that follows |
+| `/at 06:30` | Start at that time |
+| `/in 2h` | Start after that delay |
+| `/cancel` | Drop a pending scheduled start |
+| `/for 90` | Runtime limit for this burn only |
+| `/level 4` | Power level, in MANUAL |
+| `/temp 22` | Target temperature, in AUTO |
+| `/tank` | What is left, and roughly how long it lasts |
+| `/filled`, `/filled 10` | Tank filled up, or ten litres added |
+| `/stats` | Hours, fuel and starts, all time and since the last service |
+| `/service done` | Record a service and start those counters again |
+| `/ign` | The last few starts, and whether they are getting worse |
+| `/id`, `/help` | Chat id, and this list |
 
 **Polling interval** defaults to 20 seconds and is configurable. Each poll
 costs mobile data, which matters on a metered plan; a preheat scheduled hours
@@ -284,10 +328,56 @@ cokes up the burner and makes ignition progressively harder.
 The heater is then tracked through `SHUTDOWN` → `SHUTTING_DOWN` → `COOLING`
 until it reports `OFF`, and a Telegram alert is raised if it never does.
 
+A start inside that window is refused rather than allowed and then undone.
+Lighting a heater only to stop it minutes later is worse than not lighting it:
+the burner never reaches a steady flame, and that is what cokes it up.
+
 The deadline needs a synchronised clock, since the ESP32 boots believing it is
 1970. Without one it is skipped entirely and only the runtime limit applies —
 the realistic case being a morning where mains power returns before the router
 does. NTP server and UTC offset are set in the same tab.
+
+---
+
+## Fuel, and what wears out
+
+Both are worked out from numbers the controller already had and used to throw
+away. Neither needs any extra hardware.
+
+**Fuel.** Each pump stroke doses a fixed volume, so consumption follows from
+the pump rate the heater reports. Switch the tank estimate on in the
+**⏱ Timers** tab and give it a capacity, and the controller keeps a running
+figure for what is left, warns at a quarter and at a tenth, and says so when a
+burn about to start needs more than the tank holds.
+
+The switch is separate from the capacity, so turning the estimate off keeps
+the capacity for later. Nothing is debited while it is off, and switching it
+back on rearms the warnings from wherever the figure now sits rather than
+firing for a crossing that happened while nobody was counting — the stored
+figure will be stale by whatever was burnt in between, which is what `/filled`
+or `/tank` is for.
+
+This is dead reckoning, not a gauge. The dose drifts with pump wear,
+temperature and supply voltage, so the figure is always shown with a tilde.
+`/filled` after a real fill wipes the accumulated error; `/tank 7` corrects it
+by hand.
+
+**Wear.** Hours, fuel and starts are counted for the life of the device and
+again since the last service, which `/service done` records. What matters for
+the glow plug is the number of starts rather than the hours, and decoking is
+due on accumulated running — neither was counted anywhere before.
+
+**Ignition quality.** Every start is logged: how long it took to reach
+`RUNNING`, how far the glow plug dragged the supply down while it tried, the
+ambient temperature, and how many attempts it needed. The median of the last
+five is compared against the same burner just after it was serviced, and a
+drift past either threshold is reported once. A glow plug on its way out
+announces itself this way months before it finally refuses to light in a
+frost.
+
+All of it lives in NVS, written at the end of each burn, every ten minutes
+while one runs, and before a scheduled shutdown — a handful of writes a day,
+which is what keeps the nightly power cut from costing anything.
 
 ---
 
@@ -300,8 +390,9 @@ host, with no board attached:
 make test
 ```
 
-62 cases covering the shutdown scheduler, the chat whitelist, settings form
-parsing, CRC-16 and the CC1101 frequency maths. The scheduler is the reason the
+170 cases covering the shutdown scheduler, the level stepper, the persistent
+counters and ring buffers, the ignition trend, fuel and tank arithmetic, the
+chat whitelist, settings form parsing, CRC-16 and the CC1101 frequency maths. The scheduler is the reason the
 suite exists — it switches off a heater, and states like "21:45 with an
 unsynced clock" or a shutdown window wrapping past midnight are awkward to
 stage on real hardware.
