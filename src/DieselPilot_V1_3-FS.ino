@@ -2465,7 +2465,19 @@ void setupOTA() {
     ArduinoOTA.setHostname(deviceName.c_str());
     if(otaPassword.length() > 0) ArduinoOTA.setPassword(otaPassword.c_str());
 
+    // ArduinoOTA.handle() does not return until the whole image has arrived,
+    // so loop() -- and with it feedWatchdog() -- stops running for the length
+    // of the transfer. A firmware image takes about a minute, the watchdog
+    // fires at sixty seconds, and the board was being reset just as the last
+    // block landed: the upload reported 100% and then timed out waiting for a
+    // device that had already rebooted. The filesystem image is a tenth of
+    // the size and slipped under the limit, which is what made this look like
+    // a firmware-only problem.
+    //
+    // These callbacks are the only code that runs during the transfer, so the
+    // watchdog gets fed from here.
     ArduinoOTA.onStart([]() {
+        feedWatchdog();
         displayLine1 = "OTA UPDATE";
         displayLine2 = "Starting...";
         displayLine3 = "";
@@ -2474,17 +2486,29 @@ void setupOTA() {
         Serial.println("OTA: Update started");
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        feedWatchdog();
+
+        // Redrawing costs a full framebuffer over I2C, some 25 ms, and this
+        // fires once per block -- over a thousand times for a firmware image.
+        // That was most of the transfer time. Once per percent is plenty for
+        // something a human is watching.
+        static int lastPct = -1;
         int pct = total ? (progress * 100) / total : 0;
+        if(pct == lastPct) return;
+        lastPct = pct;
+
         displayLine2 = "Flashing " + String(pct) + "%";
         updateDisplay();
     });
     ArduinoOTA.onEnd([]() {
+        feedWatchdog();
         displayLine2 = "Done!";
         displayLine3 = "Rebooting...";
         updateDisplay();
         Serial.println("\nOTA: Update complete");
     });
     ArduinoOTA.onError([](ota_error_t error) {
+        feedWatchdog();
         displayLine2 = "OTA FAILED!";
         displayLine3 = "Err " + String(error);
         updateDisplay();
