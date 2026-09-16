@@ -146,6 +146,7 @@
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s;
+            width: 100%;
         }
         button:hover {
             background: linear-gradient(135deg, rgba(255, 107, 0, 0.3), rgba(255, 107, 0, 0.2));
@@ -180,7 +181,19 @@
         }
         input::placeholder { color: #666; }
         
-        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+        .form-row > input, .form-row > button, .form-row > .field { margin-bottom: 0; }
+
+        /* A label and its input travel together, so a two-column row keeps
+           each pair in one cell instead of spreading them across two. */
+        .field { margin-bottom: 12px; }
+        .field > input, .field > select, .field > textarea { margin-bottom: 0; }
+        .lbl {
+            display: block;
+            font-size: 0.8rem;
+            color: #9a9a9a;
+            margin-bottom: 6px;
+        }
         .form-section { margin-bottom: 24px; }
         
         .toggle-row {
@@ -222,7 +235,7 @@
             padding: 12px;
             font-size: 0.9rem;
             color: #ccc;
-            margin-top: 12px;
+            margin: 12px 0;
         }
         .info strong { color: #ff6b00; }
 
@@ -463,13 +476,22 @@
         <div id="pairing" class="tab-content active">
             <div class="glass-card">
                 <h2>🔗 Pairing</h2>
-                <select id="version">
-                    <option value="V2">Protocol V2 (433.937 MHz)</option>
-                    <option value="V1">Protocol V1 (433.920 MHz)</option>
-                </select>
-                <input type="number" id="customFreq" placeholder="Custom Frequency (Hz) — optional">
+                <div class="field">
+                    <label class="lbl">Heater protocol</label>
+                    <select id="version">
+                        <option value="V2">Protocol V2 (433.937 MHz)</option>
+                        <option value="V1">Protocol V1 (433.920 MHz)</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label class="lbl">Custom frequency, Hz — optional</label>
+                    <input type="number" id="customFreq" placeholder="Custom Frequency (Hz) — optional">
+                </div>
                 <button onclick="autoPair()">🔍 AUTO PAIR</button>
-                <input type="text" id="manualAddr" placeholder="Manual Address (0xCA00445B)" style="margin-top:12px;">
+                <div class="field">
+                    <label class="lbl">Heater address</label>
+                    <input type="text" id="manualAddr" placeholder="Manual Address (0xCA00445B)" style="margin-top:12px;">
+                </div>
                 <button onclick="manualPair()">✏️ MANUAL PAIR</button>
                 <div class="info" id="pairProgress" style="display:none;">
                     🔍 Listening… <span id="pairLeft">60</span> s left.
@@ -484,9 +506,18 @@
         <div id="wifi" class="tab-content">
             <div class="glass-card">
                 <h2>📡 WiFi Configuration</h2>
-                <input type="text" id="deviceName" placeholder="Hostname (empty = keep current)">
-                <input type="text" id="wifiSSID" placeholder="WiFi SSID (empty = keep current)">
-                <input type="password" id="wifiPass" placeholder="WiFi Password (empty = keep current)">
+                <div class="field">
+                    <label class="lbl">Hostname</label>
+                    <input type="text" id="deviceName" placeholder="Hostname (empty = keep current)">
+                </div>
+                <div class="field">
+                    <label class="lbl">Network name</label>
+                    <input type="text" id="wifiSSID" placeholder="WiFi SSID (empty = keep current)">
+                </div>
+                <div class="field">
+                    <label class="lbl">Password</label>
+                    <input type="password" id="wifiPass" placeholder="WiFi Password (empty = keep current)">
+                </div>
                 <button onclick="saveWiFi()">💾 SAVE &amp; REBOOT</button>
                 <div class="info">Blank fields keep their saved value. Type <strong>__CLEAR__</strong> to erase one.</div>
             </div>
@@ -496,10 +527,19 @@
         <div id="mqtt" class="tab-content">
             <div class="glass-card">
                 <h2>📨 MQTT Configuration</h2>
-                <input type="text" id="mqttServer" placeholder="MQTT Broker IP (empty = keep current)">
+                <div class="field">
+                    <label class="lbl">Broker address</label>
+                    <input type="text" id="mqttServer" placeholder="MQTT Broker IP (empty = keep current)">
+                </div>
                 <div class="form-row">
-                    <input type="number" id="mqttPort" placeholder="Port" value="1883">
-                    <input type="text" id="mqttTopic" placeholder="Topic (empty = keep current)">
+                    <div class="field">
+                        <label class="lbl">Port</label>
+                        <input type="number" id="mqttPort" placeholder="Port" value="1883">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Topic</label>
+                        <input type="text" id="mqttTopic" placeholder="Topic (empty = keep current)">
+                    </div>
                 </div>
                 <div class="toggle-row">
                     <span>Authentication</span>
@@ -509,8 +549,14 @@
                     </label>
                 </div>
                 <div id="mqttAuthFields" style="display:none;">
-                    <input type="text" id="mqttUser" placeholder="Username (empty = keep current)">
-                    <input type="password" id="mqttPass" placeholder="Password (empty = keep current)">
+                    <div class="field">
+                        <label class="lbl">Username</label>
+                        <input type="text" id="mqttUser" placeholder="Username (empty = keep current)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Password</label>
+                        <input type="password" id="mqttPass" placeholder="Password (empty = keep current)">
+                    </div>
                 </div>
                 <button onclick="saveMQTT()">💾 SAVE MQTT</button>
                 <div class="info">Blank fields keep their saved value. Clear the broker address with <strong>__CLEAR__</strong> to disable MQTT.</div>
@@ -530,11 +576,17 @@
                     </label>
                 </div>
 
-                <input type="password" id="tgToken" autocomplete="new-password"
-                       placeholder="Bot token from @BotFather (empty = keep current)">
+                <div class="field">
+                    <label class="lbl">Bot token</label>
+                    <input type="password" id="tgToken" autocomplete="new-password"
+                           placeholder="Bot token from @BotFather (empty = keep current)">
+                </div>
 
-                <input type="text" id="tgChats"
-                       placeholder="Allowed chat ids, comma separated">
+                <div class="field">
+                    <label class="lbl">Allowed chat ids</label>
+                    <input type="text" id="tgChats"
+                           placeholder="Allowed chat ids, comma separated">
+                </div>
                 <div class="info">
                     Anyone can find a bot by name and message it, so only the ids
                     listed here may control the heater. An empty list allows nobody.
@@ -545,8 +597,11 @@
                     <button onclick="testTelegram()">✉️ SEND TEST</button>
                 </div>
 
-                <input type="number" id="tgPoll" min="5" max="300"
-                       placeholder="Idle poll interval, seconds (60 = default)">
+                <div class="field">
+                    <label class="lbl">Idle poll interval, seconds</label>
+                    <input type="number" id="tgPoll" min="5" max="300"
+                           placeholder="Idle poll interval, seconds (60 = default)">
+                </div>
                 <div class="info">
                     The bot polls every 3 s for a minute after each message, so the
                     keyboard stays responsive while you use it. This setting is the
@@ -581,7 +636,10 @@
                 <h2 style="font-size:1rem; margin-top:16px;">Scheduled start</h2>
                 <div class="info" id="schedState">No start scheduled.</div>
                 <div class="form-row">
-                    <input type="time" id="schedAt" title="When to light the heater">
+                    <div class="field">
+                        <label class="lbl">Start at</label>
+                        <input type="time" id="schedAt" title="When to light the heater">
+                    </div>
                     <button onclick="setSchedule()">⏰ SCHEDULE</button>
                 </div>
                 <button class="danger" onclick="cancelSchedule()">✕ CANCEL SCHEDULE</button>
@@ -593,8 +651,11 @@
                 </div>
 
                 <h2 style="font-size:1rem; margin-top:16px;">Runtime limit</h2>
-                <input type="number" id="tmAutoOff" min="0" max="1440"
-                       placeholder="Auto-off after N minutes (0 = disabled)">
+                <div class="field">
+                    <label class="lbl">Stop after, minutes — 0 disables</label>
+                    <input type="number" id="tmAutoOff" min="0" max="1440"
+                           placeholder="Auto-off after N minutes (0 = disabled)">
+                </div>
 
                 <h2 style="font-size:1rem; margin-top:16px;">Scheduled power cut</h2>
                 <div class="toggle-row">
@@ -605,12 +666,21 @@
                     </label>
                 </div>
                 <div class="form-row">
-                    <input type="time" id="tmBlackoutAt" title="When mains power is cut">
-                    <input type="number" id="tmLead" min="1" max="240"
-                           placeholder="Stop N min earlier">
+                    <div class="field">
+                        <label class="lbl">Power is cut at</label>
+                        <input type="time" id="tmBlackoutAt" title="When mains power is cut">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Stop this many minutes earlier</label>
+                        <input type="number" id="tmLead" min="1" max="240"
+                               placeholder="Stop N min earlier">
+                    </div>
                 </div>
-                <input type="number" id="tmCooldown" min="1" max="60"
-                       placeholder="Expected purge duration, minutes">
+                <div class="field">
+                    <label class="lbl">Expected purge, minutes</label>
+                    <input type="number" id="tmCooldown" min="1" max="60"
+                           placeholder="Expected purge duration, minutes">
+                </div>
                 <div class="info">
                     Cutting power to a running heater skips the purge cycle, which
                     cokes up the burner over time. The controller stops it early so
@@ -619,10 +689,16 @@
                 </div>
 
                 <h2 style="font-size:1rem; margin-top:16px;">Fuel and wear</h2>
-                <input type="number" id="tmFuelDose" min="5" max="60"
-                       placeholder="Pump dose, microlitres per stroke (22 = typical)">
-                <input type="number" id="tmServiceHrs" min="0" max="2000"
-                       placeholder="Hours of running between services, 0 = no reminder">
+                <div class="field">
+                    <label class="lbl">Pump dose, microlitres per stroke</label>
+                    <input type="number" id="tmFuelDose" min="5" max="60"
+                           placeholder="Pump dose, microlitres per stroke (22 = typical)">
+                </div>
+                <div class="field">
+                    <label class="lbl">Service interval, hours — 0 disables</label>
+                    <input type="number" id="tmServiceHrs" min="0" max="2000"
+                           placeholder="Hours of running between services, 0 = no reminder">
+                </div>
                 <div class="info">
                     The dose sets how consumption is worked out: litres per hour is
                     dose times pump frequency. Hours since the last service are
@@ -637,16 +713,25 @@
                         <span class="slider"></span>
                     </label>
                 </div>
-                <input type="number" id="tmTankCap" min="0" max="200000" step="500"
-                       placeholder="Tank capacity in millilitres">
+                <div class="field">
+                    <label class="lbl">Tank capacity, millilitres</label>
+                    <input type="number" id="tmTankCap" min="0" max="200000" step="500"
+                           placeholder="Tank capacity in millilitres">
+                </div>
                 <div class="info" id="tankInfo"></div>
 
                 <h2 style="font-size:1rem; margin-top:16px;">Progress reports</h2>
                 <div class="form-row">
-                    <input type="number" id="tmRepFirst" min="0" max="600"
-                           placeholder="First report after N min (0 = never)">
-                    <input type="number" id="tmRepRpt" min="0" max="600"
-                           placeholder="Repeat every N min (0 = once)">
+                    <div class="field">
+                        <label class="lbl">First report after, minutes</label>
+                        <input type="number" id="tmRepFirst" min="0" max="600"
+                               placeholder="First report after N min (0 = never)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Repeat every, minutes — 0 for once</label>
+                        <input type="number" id="tmRepRpt" min="0" max="600"
+                               placeholder="Repeat every N min (0 = once)">
+                    </div>
                 </div>
                 <div class="info">
                     &laquo;Heater: RUNNING&raquo; only says the state changed. These
@@ -657,13 +742,22 @@
 
                 <h2 style="font-size:1rem; margin-top:16px;">Supply voltage</h2>
                 <div class="form-row">
-                    <input type="number" id="tmVoltAlarm" min="80" max="160"
-                           placeholder="Warn below, tenths of V (120 = 12.0)">
-                    <input type="number" id="tmVoltClear" min="80" max="170"
-                           placeholder="Clear above (125 = 12.5)">
+                    <div class="field">
+                        <label class="lbl">Warn below, tenths of a volt</label>
+                        <input type="number" id="tmVoltAlarm" min="80" max="160"
+                               placeholder="Warn below, tenths of V (120 = 12.0)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Clear above, tenths of a volt</label>
+                        <input type="number" id="tmVoltClear" min="80" max="170"
+                               placeholder="Clear above (125 = 12.5)">
+                    </div>
                 </div>
-                <input type="number" id="tmVoltDeb" min="1" max="600"
-                       placeholder="Hold for N seconds before reporting (30)">
+                <div class="field">
+                    <label class="lbl">Hold for, seconds</label>
+                    <input type="number" id="tmVoltDeb" min="1" max="600"
+                           placeholder="Hold for N seconds before reporting (30)">
+                </div>
                 <div class="info">
                     The glow plug pulls eight to ten amps at ignition, so the rail
                     dips briefly every start. Only a sag that holds is reported —
@@ -672,9 +766,15 @@
 
                 <h2 style="font-size:1rem; margin-top:16px;">Clock</h2>
                 <div class="form-row">
-                    <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
-                    <input type="number" id="tmTz" min="-720" max="840"
-                           placeholder="UTC offset, min (180 = UTC+3)">
+                    <div class="field">
+                        <label class="lbl">NTP server</label>
+                        <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">UTC offset, minutes</label>
+                        <input type="number" id="tmTz" min="-720" max="840"
+                               placeholder="UTC offset, min (180 = UTC+3)">
+                    </div>
                 </div>
 
                 <button onclick="saveTimers()">💾 SAVE TIMERS</button>
@@ -695,7 +795,10 @@
                     </label>
                 </div>
 
-                <input type="password" id="otaPass" placeholder="OTA Password (empty = keep current)" autocomplete="new-password">
+                <div class="field">
+                    <label class="lbl">OTA password</label>
+                    <input type="password" id="otaPass" placeholder="OTA Password (empty = keep current)" autocomplete="new-password">
+                </div>
                 <button onclick="saveOTA()">💾 SAVE &amp; REBOOT</button>
 
                 <!-- Shown when OTA is ON -->
