@@ -96,6 +96,46 @@ uint32_t fuelTickPerSecond(uint16_t doseUl, uint16_t pumpFreqTenths);
 uint32_t fuelMlFromTicks(uint32_t ticks);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TANK
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// What is left in the tank is worked out by dead reckoning from the pump --
+// there is no sensor, and none is needed for the question that actually
+// matters here, which is whether a hundred-kilometre drive ends at a heater
+// that runs. The estimate drifts, because the dose varies with pump wear,
+// temperature and supply voltage, so it is always shown as an approximation
+// and a real refill resets the accumulated error outright.
+
+// Warning bands, as a percentage of tank capacity.
+#define TANK_WARN_LOW_PCT   25
+#define TANK_WARN_EMPTY_PCT 10
+
+// A pump rate to estimate with before the device has burnt enough to have an
+// average of its own. Mid-range for these heaters.
+#define FUEL_NOMINAL_PUMP_HZ_TENTHS 30
+
+// Takes `ml` out of the tank, stopping at empty rather than wrapping.
+void tankDebit(uint32_t& remainingMl, uint32_t ml);
+
+// Puts `ml` in, stopping at capacity. `ml` of zero means a full tank, which
+// is what "/filled" without a figure says.
+void tankRefill(uint32_t& remainingMl, uint32_t capacityMl, uint32_t ml);
+
+// 0 when there is plenty, 1 below TANK_WARN_LOW_PCT, 2 below
+// TANK_WARN_EMPTY_PCT. Warning when this rises -- and only then -- is what
+// keeps one message per crossing; a refill lowers it and rearms the warning
+// with no separate latch to reset.
+uint8_t tankWarnLevel(uint32_t remainingMl, uint32_t capacityMl);
+
+// Millilitres an hour, averaged over whatever history exists. Falls back to
+// the nominal rate at this dose until there is enough of it, so a fresh
+// device still estimates rather than refusing to.
+uint32_t fuelRateMlPerHour(uint32_t fuelMl, uint32_t burnSec, uint16_t doseUl);
+
+// What a burn of that length would take at that rate.
+uint32_t fuelNeededMl(uint32_t rateMlPerHour, uint16_t minutes);
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CRC-16/MODBUS
 // ═══════════════════════════════════════════════════════════════════════════
 

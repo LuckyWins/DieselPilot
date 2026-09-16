@@ -175,6 +175,108 @@ void test_fuel_accumulator_has_headroom(void) {
     TEST_ASSERT_TRUE(week / perSec == 7UL * 24UL * 3600UL);   // no wrap
 }
 
+// ── Tank ──────────────────────────────────────────────────────────────────
+//
+// Dead reckoning with no sensor, so the arithmetic is all there is between
+// the estimate and a drive to a heater that will not run.
+
+void test_tank_debit_takes_fuel_out(void) {
+    uint32_t left = 10000;
+    tankDebit(left, 2500);
+    TEST_ASSERT_EQUAL_UINT32(7500, left);
+}
+
+// An estimate that has drifted low must read empty, never wrap to a full tank.
+void test_tank_debit_stops_at_empty(void) {
+    uint32_t left = 300;
+    tankDebit(left, 1000);
+    TEST_ASSERT_EQUAL_UINT32(0, left);
+    tankDebit(left, 1);
+    TEST_ASSERT_EQUAL_UINT32(0, left);
+}
+
+void test_tank_refill_adds_what_was_poured_in(void) {
+    uint32_t left = 2000;
+    tankRefill(left, 12000, 5000);
+    TEST_ASSERT_EQUAL_UINT32(7000, left);
+}
+
+// "/filled" with no figure means the tank is full, which is also the moment
+// the accumulated drift is wiped out.
+void test_tank_refill_without_an_amount_means_full(void) {
+    uint32_t left = 2000;
+    tankRefill(left, 12000, 0);
+    TEST_ASSERT_EQUAL_UINT32(12000, left);
+}
+
+void test_tank_refill_cannot_overfill(void) {
+    uint32_t left = 10000;
+    tankRefill(left, 12000, 5000);
+    TEST_ASSERT_EQUAL_UINT32(12000, left);
+}
+
+void test_tank_warning_bands(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, tankWarnLevel(6000, 12000));   // half
+    TEST_ASSERT_EQUAL_UINT8(0, tankWarnLevel(3120, 12000));   // 26%
+    TEST_ASSERT_EQUAL_UINT8(1, tankWarnLevel(3000, 12000));   // 25%
+    TEST_ASSERT_EQUAL_UINT8(1, tankWarnLevel(1500, 12000));   // 12.5%
+    TEST_ASSERT_EQUAL_UINT8(2, tankWarnLevel(1200, 12000));   // 10%
+    TEST_ASSERT_EQUAL_UINT8(2, tankWarnLevel(0,    12000));
+}
+
+// Capacity of zero switches the whole feature off, and a device that has
+// never been told its tank size must not start crying empty.
+void test_tank_warning_is_silent_without_a_capacity(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, tankWarnLevel(0, 0));
+}
+
+// Warning on a rise and only on a rise is what gives one message per
+// crossing, and a refill rearms it without a latch to reset.
+void test_tank_warning_rises_once_and_resets_on_a_refill(void) {
+    uint32_t cap  = 12000;
+    uint32_t left = 4000;
+    uint8_t  last = tankWarnLevel(left, cap);
+    TEST_ASSERT_EQUAL_UINT8(0, last);
+
+    tankDebit(left, 1500);                       // down to 20%
+    uint8_t now = tankWarnLevel(left, cap);
+    TEST_ASSERT_TRUE(now > last);                // warns
+    last = now;
+
+    tankDebit(left, 500);                        // still in the same band
+    TEST_ASSERT_FALSE(tankWarnLevel(left, cap) > last);
+
+    tankRefill(left, cap, 0);
+    TEST_ASSERT_EQUAL_UINT8(0, tankWarnLevel(left, cap));
+}
+
+// ── Consumption estimate ──────────────────────────────────────────────────
+
+void test_fuel_rate_uses_real_history_once_there_is_some(void) {
+    // Two hours of burning on one litre.
+    TEST_ASSERT_EQUAL_UINT32(500, fuelRateMlPerHour(1000, 7200, 22));
+}
+
+// Ten minutes of history is mostly ignition and warm-up, which would read
+// far higher than a steady burn.
+void test_fuel_rate_falls_back_before_there_is_history(void) {
+    uint32_t nominal = fuelRateMlPerHour(0, 0, 22);
+    TEST_ASSERT_EQUAL_UINT32(237, nominal);                 // 22 ul at 3.0 Hz
+    TEST_ASSERT_EQUAL_UINT32(nominal, fuelRateMlPerHour(50, 300, 22));
+    TEST_ASSERT_EQUAL_UINT32(nominal, fuelRateMlPerHour(0, 99999, 22));
+}
+
+void test_fuel_rate_follows_the_dose_when_falling_back(void) {
+    TEST_ASSERT_TRUE(fuelRateMlPerHour(0, 0, 30) > fuelRateMlPerHour(0, 0, 22));
+}
+
+void test_fuel_needed_for_a_planned_burn(void) {
+    TEST_ASSERT_EQUAL_UINT32(500,  fuelNeededMl(500, 60));
+    TEST_ASSERT_EQUAL_UINT32(750,  fuelNeededMl(500, 90));
+    TEST_ASSERT_EQUAL_UINT32(0,    fuelNeededMl(500, 0));
+    TEST_ASSERT_EQUAL_UINT32(1000, fuelNeededMl(500, 120));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -200,6 +302,20 @@ int main(int, char**) {
     RUN_TEST(test_fuel_is_zero_while_the_pump_is_idle);
     RUN_TEST(test_fuel_honours_a_different_dose);
     RUN_TEST(test_fuel_accumulator_has_headroom);
+
+    RUN_TEST(test_tank_debit_takes_fuel_out);
+    RUN_TEST(test_tank_debit_stops_at_empty);
+    RUN_TEST(test_tank_refill_adds_what_was_poured_in);
+    RUN_TEST(test_tank_refill_without_an_amount_means_full);
+    RUN_TEST(test_tank_refill_cannot_overfill);
+    RUN_TEST(test_tank_warning_bands);
+    RUN_TEST(test_tank_warning_is_silent_without_a_capacity);
+    RUN_TEST(test_tank_warning_rises_once_and_resets_on_a_refill);
+
+    RUN_TEST(test_fuel_rate_uses_real_history_once_there_is_some);
+    RUN_TEST(test_fuel_rate_falls_back_before_there_is_history);
+    RUN_TEST(test_fuel_rate_follows_the_dose_when_falling_back);
+    RUN_TEST(test_fuel_needed_for_a_planned_burn);
 
     RUN_TEST(test_state_names);
     RUN_TEST(test_error_names);

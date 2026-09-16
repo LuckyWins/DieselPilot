@@ -629,6 +629,18 @@
                     counted regardless; the figure above only decides when to say
                     something about them.
                 </div>
+
+                <div class="toggle-row" style="margin-top:12px;">
+                    <span>Estimate what is left in the tank</span>
+                    <label class="switch">
+                        <input type="checkbox" id="tmTankEn">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <input type="number" id="tmTankCap" min="0" max="200000" step="500"
+                       placeholder="Tank capacity in millilitres">
+                <div class="info" id="tankInfo"></div>
+
                 <h2 style="font-size:1rem; margin-top:16px;">Progress reports</h2>
                 <div class="form-row">
                     <input type="number" id="tmRepFirst" min="0" max="600"
@@ -907,7 +919,21 @@
                 document.getElementById('tmLead').value        = d.lead;
                 document.getElementById('tmCooldown').value    = d.cooldown;
                 document.getElementById('tmFuelDose').value    = d.fuelDose;
+                document.getElementById('tmTankEn').checked    = d.tankEn;
+                document.getElementById('tmTankCap').value     = d.tankCap;
                 document.getElementById('tmServiceHrs').value  = d.serviceHrs;
+                // Dead reckoning from the pump, so it is shown as an estimate
+                // and corrected from the chat with /filled or /tank.
+                document.getElementById('tankInfo').textContent =
+                    !d.tankEn  ? 'Off. The capacity is kept, so switching this back '
+                               + 'on picks up where it left off — though the figure '
+                               + 'will be stale by whatever was burnt meanwhile.'
+                  : !d.tankCap ? 'Switched on, but there is no capacity to measure '
+                               + 'against. Enter one below.'
+                               : `Tank holds about ${(d.tankLeft / 1000).toFixed(1)} l `
+                               + `of ${(d.tankCap / 1000).toFixed(1)} l — estimated `
+                               + `from the pump, not measured. Correct it with `
+                               + `/filled or /tank in the chat.`;
                 document.getElementById('tmVoltAlarm').value   = d.voltAlarm;
                 document.getElementById('tmVoltClear').value   = d.voltClear;
                 document.getElementById('tmVoltDeb').value     = d.voltDeb;
@@ -947,6 +973,8 @@
             lead:       document.getElementById('tmLead').value,
             cooldown:   document.getElementById('tmCooldown').value,
             fuelDose:   document.getElementById('tmFuelDose').value,
+            tankEn:     document.getElementById('tmTankEn').checked ? '1' : '0',
+            tankCap:    document.getElementById('tmTankCap').value,
             serviceHrs: document.getElementById('tmServiceHrs').value,
             voltAlarm:  document.getElementById('tmVoltAlarm').value,
             voltClear:  document.getElementById('tmVoltClear').value,

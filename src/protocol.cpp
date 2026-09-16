@@ -36,6 +36,46 @@ uint32_t fuelMlFromTicks(uint32_t ticks) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TANK
+// ═══════════════════════════════════════════════════════════════════════════
+
+void tankDebit(uint32_t& remainingMl, uint32_t ml) {
+    remainingMl = (remainingMl > ml) ? remainingMl - ml : 0;
+}
+
+void tankRefill(uint32_t& remainingMl, uint32_t capacityMl, uint32_t ml) {
+    if(ml == 0 || remainingMl + ml > capacityMl) remainingMl = capacityMl;
+    else                                         remainingMl += ml;
+}
+
+uint8_t tankWarnLevel(uint32_t remainingMl, uint32_t capacityMl) {
+    if(capacityMl == 0) return 0;          // the feature is switched off
+
+    // Integer percent of what is left, rounded down, so a tank sitting
+    // exactly on a threshold counts as being at it.
+    uint32_t pct = (uint32_t)((uint64_t)remainingMl * 100ULL / capacityMl);
+
+    if(pct <= TANK_WARN_EMPTY_PCT) return 2;
+    if(pct <= TANK_WARN_LOW_PCT)   return 1;
+    return 0;
+}
+
+uint32_t fuelRateMlPerHour(uint32_t fuelMl, uint32_t burnSec, uint16_t doseUl) {
+    // Under ten minutes of history the average is mostly ignition and warm-up
+    // rather than steady burning, and would read far too high.
+    if(burnSec >= 600 && fuelMl > 0) {
+        return (uint32_t)((uint64_t)fuelMl * 3600ULL / burnSec);
+    }
+    uint32_t ticksPerHour =
+        fuelTickPerSecond(doseUl, FUEL_NOMINAL_PUMP_HZ_TENTHS) * 3600UL;
+    return fuelMlFromTicks(ticksPerHour);
+}
+
+uint32_t fuelNeededMl(uint32_t rateMlPerHour, uint16_t minutes) {
+    return (uint32_t)((uint64_t)rateMlPerHour * minutes / 60ULL);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CRC-16/MODBUS
 // ═══════════════════════════════════════════════════════════════════════════
 

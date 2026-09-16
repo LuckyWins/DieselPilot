@@ -234,6 +234,13 @@ uint16_t sessionAutoOffMin = 0;
 uint32_t fuelTicks  = 0;
 uint16_t fuelDoseUl = FUEL_DOSE_UL_DEFAULT;
 
+// Tank, by dead reckoning from the pump. The switch is separate from the
+// capacity so turning the feature off does not throw the capacity away.
+bool     tankEnabled     = false;
+uint32_t tankCapacityMl  = 0;
+uint32_t tankRemainingMl = 0;
+static uint8_t tankWarnLast = 0;
+
 // What each start looked like. The retry watcher gives up as soon as the
 // heater acknowledges the command; what says something about the glow plug is
 // what happens after that, so this is measured separately.
@@ -1057,8 +1064,10 @@ String   clockOfPublic(uint32_t epoch);
 // Defined further down, with the power level walk.
 bool     startLevelChange(int64_t chatId, const String& cmd, String& reply);
 
-// Defined further down, with the counters.
+// Defined further down, with the fuel counters.
 String   mlText(uint32_t ml);
+String   fuelWarningForRun();
+bool     tankActive();
 String   statsText();
 String   ignText();
 void     persistStats();
@@ -1095,6 +1104,10 @@ static String tgStatusText() {
     m += "Mode:     " + String(heaterStatus.autoMode ? "AUTO" : "MANUAL") + "\n";
     if(fuelTicks) {
         m += "Fuel:     ~" + String(fuelMlFromTicks(fuelTicks)) + " ml this burn\n";
+    }
+    if(tankActive()) {
+        m += "Tank:     ~" + mlText(tankRemainingMl) + " of " +
+             mlText(tankCapacityMl) + "\n";
     }
     uint32_t age = (millis() - heaterStatus.lastUpdate) / 1000;
     m += "\nUpdated:  " + String(age) + " s ago";
@@ -1154,6 +1167,8 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
             "/stats - hours, fuel and starts\n"
             "/ign - how the last few starts went\n"
             "/service done - reset the counters since the last service\n"
+            "/tank - what is left in the tank\n"
+            "/filled - tank filled up, /filled 10 - ten litres added\n"
             "/id - show your chat id");
         return;
     }
@@ -1195,6 +1210,50 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
         countersDirty = true;
         persistStats();
         tgBot.sendTo(chatId, "🔧 Service recorded — counters since it start again");
+        return;
+    }
+
+    // Litres in the chat, millilitres inside: nobody thinks about a tank in
+    // millilitres, and the accumulator has to.
+    if(cmd == "/filled" || cmd.startsWith("/filled ")) {
+        if(!tankActive()) {
+            tgBot.sendTo(chatId, "Tank tracking is off — switch it on in the "
+                                 "Timers tab and give it a capacity");
+            return;
+        }
+        uint32_t added = (uint32_t)(cmd.substring(7).toFloat() * 1000.0);
+        tankRefill(tankRemainingMl, tankCapacityMl, added);
+        tankWarnLast  = tankWarnLevel(tankRemainingMl, tankCapacityMl);
+        countersDirty = true;
+        persistStats();
+        tgBot.sendTo(chatId, "⛽ Tank now ~" + mlText(tankRemainingMl) +
+                             " of " + mlText(tankCapacityMl));
+        return;
+    }
+
+    // The estimate drifts, so there has to be a way to correct it without
+    // waiting for a full tank to reset it.
+    if(cmd == "/tank" || cmd.startsWith("/tank ")) {
+        if(!tankActive()) {
+            tgBot.sendTo(chatId, "Tank tracking is off — switch it on in the "
+                                 "Timers tab and give it a capacity");
+            return;
+        }
+        if(cmd.length() > 5) {
+            uint32_t want = (uint32_t)(cmd.substring(5).toFloat() * 1000.0);
+            if(want > tankCapacityMl) want = tankCapacityMl;
+            tankRemainingMl = want;
+            tankWarnLast    = tankWarnLevel(tankRemainingMl, tankCapacityMl);
+            countersDirty   = true;
+            persistStats();
+        }
+        uint32_t rate = fuelRateMlPerHour(counters.fuelMl, counters.burnSec,
+                                          fuelDoseUl);
+        tgBot.sendTo(chatId,
+            "⛽ Tank ~" + mlText(tankRemainingMl) + " of " + mlText(tankCapacityMl) +
+            "\nBurn rate ~" + mlText(rate) + "/h" +
+            "\nGood for roughly " + String(rate ? tankRemainingMl / rate : 0) +
+            " h — an estimate from the pump, not a gauge");
         return;
     }
 
@@ -1241,7 +1300,7 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
     if(cmd == "on" || cmd == "/on") {
         StartVerdict v = heaterEnsureOn();
         tgBot.sendTo(chatId, v == START_ALLOWED
-            ? "🔥 Ignition requested"
+            ? "🔥 Ignition requested" + fuelWarningForRun()
             : startRefusalText(v));
     } else if(cmd == "off" || cmd == "/off") {
         tgBot.sendTo(chatId, heaterEnsureOff()
@@ -1368,11 +1427,50 @@ String dateOf(uint32_t epoch) {
     return String(buf);
 }
 
+// Whether the tank estimate is running at all. Off by default, and off
+// whenever there is no capacity to measure against.
+bool tankActive() {
+    return tankEnabled && tankCapacityMl > 0;
+}
+
 // Millilitres read as litres once there are enough of them. Always with a
 // tilde at the call site: this is dead reckoning, not a gauge.
 String mlText(uint32_t ml) {
     if(ml < 1000) return String(ml) + " ml";
     return String(ml / 1000.0, 1) + " l";
+}
+
+// How long the burn just started is expected to last, for the fuel estimate.
+// Zero when nothing bounds it, in which case there is nothing to estimate.
+static uint16_t plannedRunMinutes() {
+    uint16_t limit = sessionAutoOffMin ? sessionAutoOffMin : autoOffMin;
+    if(limit) return limit;
+
+    if(blackoutEnabled && timeValid) {
+        int deadline = blackoutMinutes - (int)shutdownLeadMin;
+        while(deadline < 0) deadline += MINUTES_PER_DAY;
+        deadline %= MINUTES_PER_DAY;
+        return (uint16_t)minutesUntil(currentMinutesOfDay(), deadline);
+    }
+    return 0;
+}
+
+// Says so when the tank will not cover the burn that was just started. A
+// warning rather than a refusal: the figure is dead reckoning, and refusing
+// to light a heater on the strength of a guess is worse than being wrong.
+String fuelWarningForRun() {
+    if(!tankActive()) return "";
+
+    uint16_t minutes = plannedRunMinutes();
+    if(minutes == 0) return "";
+
+    uint32_t rate   = fuelRateMlPerHour(counters.fuelMl, counters.burnSec,
+                                        fuelDoseUl);
+    uint32_t needed = fuelNeededMl(rate, minutes);
+    if(needed <= tankRemainingMl) return "";
+
+    return "\n⚠️ Tank holds ~" + mlText(tankRemainingMl) + ", a " +
+           String(minutes) + " min burn needs ~" + mlText(needed);
 }
 
 // ── Ignition log ───────────────────────────────────────────────────────────
@@ -1558,6 +1656,10 @@ String statsText() {
             : "\nNext service in " + hoursText(due - doneS);
     }
 
+    if(tankActive()) {
+        m += "\nTank:     ~" + mlText(tankRemainingMl) + " of " +
+             mlText(tankCapacityMl);
+    }
     return m;
 }
 
@@ -1574,6 +1676,7 @@ void persistStats() {
     uint8_t blob[COUNTERS_BLOB_BYTES];
     size_t  n = countersPack(counters, blob, sizeof(blob));
     if(n) prefs.putBytes("counters", blob, n);
+    prefs.putUInt("tankRemMl", tankRemainingMl);
     countersDirty   = false;
     countersFlushMs = millis();
 }
@@ -1624,7 +1727,22 @@ void updateStats() {
         counters.fuelMl += ml;
         fuelTicksBilled += ml * FUEL_TICKS_PER_ML;
         countersDirty    = true;
+        // Only while the estimate is running. Debiting a switched-off tank
+        // would leave a figure that silently drifted out of date, and looked
+        // authoritative the day it was switched back on.
+        if(tankActive()) tankDebit(tankRemainingMl, ml);
     }
+
+    // Warning on a rise, and only on a rise, gives one message per crossing.
+    // A refill lowers the band and rearms the warning by itself.
+    uint8_t warn = tankActive()
+                 ? tankWarnLevel(tankRemainingMl, tankCapacityMl) : 0;
+    if(warn > tankWarnLast) {
+        notifyTelegram(warn >= 2
+            ? "🔴 Tank nearly empty: ~" + mlText(tankRemainingMl) + " left"
+            : "🟡 Tank running low: ~" + mlText(tankRemainingMl) + " left");
+    }
+    tankWarnLast = warn;
 
     if(burning != (lastState != STATE_OFF)) {
         counters.wasBurning = burning;
@@ -1990,7 +2108,7 @@ void updateScheduledStart() {
             cancelScheduledStart();
             StartVerdict v = heaterEnsureOn();
             notifyTelegram(v == START_ALLOWED
-                ? "⏰ Scheduled start — igniting"
+                ? "⏰ Scheduled start — igniting" + fuelWarningForRun()
                 : "⚠️ Scheduled start refused: " + startRefusalText(v));
             break;
         }
@@ -2518,11 +2636,13 @@ void handleAPI_Timers() {
     shutdownLeadMin     = formNumber("lead", shutdownLeadMin, 1, 240);
     cooldownExpectedMin = formNumber("cooldown", cooldownExpectedMin, 1, 60);
     fuelDoseUl          = formNumber("fuelDose", fuelDoseUl, 5, 60);
+    tankEnabled         = formFlag("tankEn", tankEnabled);
+    tankCapacityMl      = formNumber("tankCap", tankCapacityMl, 0, 200000);
+    serviceHours        = formNumber("serviceHrs", serviceHours, 0, 2000);
     voltAlarmDeciV      = formNumber("voltAlarm", voltAlarmDeciV, 80, 160);
     voltClearDeciV      = formNumber("voltClear", voltClearDeciV, 80, 170);
     voltDebounceS       = formNumber("voltDeb", voltDebounceS, 1, 600);
     reportFirstMin      = formNumber("reportFirst", reportFirstMin, 0, 600);
-    serviceHours        = formNumber("serviceHrs", serviceHours, 0, 2000);
     reportRptMin        = formNumber("reportRpt", reportRptMin, 0, 600);
 
     prefs.putString("ntpServer", ntpServer);
@@ -2533,11 +2653,24 @@ void handleAPI_Timers() {
     prefs.putUShort("shutdownLead", shutdownLeadMin);
     prefs.putUShort("cooldownMin", cooldownExpectedMin);
     prefs.putUShort("fuelDoseUl", fuelDoseUl);
+    prefs.putBool("tankEnabled", tankEnabled);
+    prefs.putUInt("tankCapMl", tankCapacityMl);
+    prefs.putUShort("serviceHrs", serviceHours);
+    // A tank that shrank below what it is holding would sit permanently at
+    // "full plus a bit", and the warning bands would never fire.
+    if(tankRemainingMl > tankCapacityMl) {
+        tankRemainingMl = tankCapacityMl;
+        prefs.putUInt("tankRemMl", tankRemainingMl);
+    }
+    // Switched off and on again, the stored figure is however stale the gap
+    // made it. Rearm from wherever it now sits rather than firing a warning
+    // for a crossing that happened while nobody was counting.
+    tankWarnLast = tankActive()
+                 ? tankWarnLevel(tankRemainingMl, tankCapacityMl) : 0;
     prefs.putUShort("voltAlarmDv", voltAlarmDeciV);
     prefs.putUShort("voltClearDv", voltClearDeciV);
     prefs.putUShort("voltDebSec", voltDebounceS);
     prefs.putUShort("reportFirst", reportFirstMin);
-    prefs.putUShort("serviceHrs", serviceHours);
     prefs.putUShort("reportRpt", reportRptMin);
 
     setupTime();   // pick up a changed server or offset immediately
@@ -2577,6 +2710,9 @@ void handleAPI_TimerStatus() {
     json += "\"cooldown\":" + String(cooldownExpectedMin) + ",";
     json += "\"fuelDose\":" + String(fuelDoseUl) + ",";
     json += "\"serviceHrs\":" + String(serviceHours) + ",";
+    json += "\"tankEn\":" + String(tankEnabled ? "true" : "false") + ",";
+    json += "\"tankCap\":" + String(tankCapacityMl) + ",";
+    json += "\"tankLeft\":" + String(tankRemainingMl) + ",";
     json += "\"voltAlarm\":" + String(voltAlarmDeciV) + ",";
     json += "\"voltClear\":" + String(voltClearDeciV) + ",";
     json += "\"voltDeb\":" + String(voltDebounceS) + ",";
@@ -2828,6 +2964,11 @@ void setup() {
     reportFirstMin      = prefs.getUShort("reportFirst", 30);
     reportRptMin        = prefs.getUShort("reportRpt", 0);
     serviceHours        = prefs.getUShort("serviceHrs", 0);
+    tankEnabled         = prefs.getBool("tankEnabled", false);
+    tankCapacityMl      = prefs.getUInt("tankCapMl", 0);
+    tankRemainingMl     = prefs.getUInt("tankRemMl", 0);
+    tankWarnLast        = tankActive()
+                        ? tankWarnLevel(tankRemainingMl, tankCapacityMl) : 0;
     // Lifetime counters, and the flag saying how last night ended
     loadCounters();
     loadIgnLog();
