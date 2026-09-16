@@ -186,7 +186,14 @@
 
         /* A label and its input travel together, so a two-column row keeps
            each pair in one cell instead of spreading them across two. */
-        .field { margin-bottom: 12px; }
+        /* Fields of one section sit close together; the space that separates
+           them from the next section lives on the heading below. */
+        .field { margin-bottom: 10px; }
+
+        .subhead {
+            font-size: 1rem;
+            margin: 26px 0 10px;
+        }
         .field > input, .field > select, .field > textarea { margin-bottom: 0; }
         .lbl {
             display: block;
@@ -238,6 +245,13 @@
             margin: 12px 0;
         }
         .info strong { color: #ff6b00; }
+
+        /* A fault is not a hint. Same box, different weather. */
+        .info.alert {
+            background: rgba(211, 47, 47, 0.08);
+            border-color: rgba(211, 47, 47, 0.35);
+            color: #ffb0b0;
+        }
 
         /* ── CLOUD SPECIFIC STYLES ── */
         .cloud-box {
@@ -633,7 +647,7 @@
                     <span id="tmSync"></span>
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Scheduled start</h2>
+                <h2 class="subhead">Scheduled start</h2>
                 <div class="info" id="schedState">No start scheduled.</div>
                 <div class="form-row">
                     <div class="field">
@@ -650,14 +664,14 @@
                     the overnight outage.
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Runtime limit</h2>
+                <h2 class="subhead">Runtime limit</h2>
                 <div class="field">
                     <label class="lbl">Stop after, minutes — 0 disables</label>
                     <input type="number" id="tmAutoOff" min="0" max="1440"
                            placeholder="Auto-off after N minutes (0 = disabled)">
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Scheduled power cut</h2>
+                <h2 class="subhead">Scheduled power cut</h2>
                 <div class="toggle-row">
                     <span>Shut down before the mains cut</span>
                     <label class="switch">
@@ -688,7 +702,7 @@
                     runtime limit applies.
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Fuel and wear</h2>
+                <h2 class="subhead">Fuel and wear</h2>
                 <div class="field">
                     <label class="lbl">Pump dose, microlitres per stroke</label>
                     <input type="number" id="tmFuelDose" min="5" max="60"
@@ -720,7 +734,7 @@
                 </div>
                 <div class="info" id="tankInfo"></div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Progress reports</h2>
+                <h2 class="subhead">Progress reports</h2>
                 <div class="form-row">
                     <div class="field">
                         <label class="lbl">First report after, minutes</label>
@@ -740,7 +754,7 @@
                     too early and a cold heat exchanger triggers false alarms.
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Supply voltage</h2>
+                <h2 class="subhead">Supply voltage</h2>
                 <div class="form-row">
                     <div class="field">
                         <label class="lbl">Warn below, tenths of a volt</label>
@@ -764,7 +778,7 @@
                     it means the PSU is undersized, a common cause of hard starting.
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Clock</h2>
+                <h2 class="subhead">Clock</h2>
                 <div class="form-row">
                     <div class="field">
                         <label class="lbl">NTP server</label>
@@ -875,16 +889,16 @@
                         <div class="status-value" style="font-size:1rem;" id="loopMax">--</div>
                     </div>
                 </div>
-                <h2 style="font-size:1rem; margin-top:16px;">Wear and tear</h2>
+                <h2 class="subhead">Wear and tear</h2>
                 <div class="info" id="statsBox" style="white-space:pre-line">no data yet</div>
                 <div class="form-row" style="margin-top:8px;">
                     <button onclick="serviceDone()">🔧 SERVICE DONE</button>
                 </div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Starts</h2>
+                <h2 class="subhead">Starts</h2>
                 <div class="info" id="ignBox" style="white-space:pre-line">no data yet</div>
 
-                <h2 style="font-size:1rem; margin-top:16px;">Recent errors</h2>
+                <h2 class="subhead">Recent errors</h2>
                 <div class="info" id="errorHistory">none recorded</div>
 
                 <div class="form-row" style="margin-top:12px;">
@@ -1266,16 +1280,37 @@
     // The device answering is not the same as the heater being heard. With a
     // dead RF module the tiles keep their last values indefinitely and look
     // perfectly live, so say out loud how old they are.
-    function showHeaterAge(ageSec) {
+    function showHeaterAge(data) {
         const box = document.getElementById('heaterAge');
-        if(ageSec === undefined || ageSec < 0) {
+        const show = (text, alert) => {
             box.style.display = 'block';
-            box.textContent   = 'No reply from the heater yet.';
+            box.textContent   = text;
+            box.classList.toggle('alert', !!alert);
+        };
+
+        // Worst first. A dead radio explains every silence below it, and
+        // saying "no reply from the heater" instead would send somebody
+        // looking at the heater rather than at the wiring in front of them.
+        if(data.rfFault) {
+            show('🔴 RF module is not responding — check the CC1101 wiring. ' +
+                 'Nothing can reach the heater until it does.', true);
             return;
         }
-        const stale = ageSec > 30;
-        box.style.display = stale ? 'block' : 'none';
-        box.textContent   = `⚠️ Heater last heard ${ageSec} s ago — readings may be stale.`;
+        if(!data.paired) {
+            show('Heater is not paired. Pair it in the Pairing tab.', false);
+            return;
+        }
+        if(data.ageSec === undefined || data.ageSec < 0) {
+            show('No reply from the heater yet.', false);
+            return;
+        }
+        if(data.ageSec > 30) {
+            show(`⚠️ Heater last heard ${data.ageSec} s ago — readings may be stale.`,
+                 true);
+            return;
+        }
+        box.style.display = 'none';
+        box.classList.remove('alert');
     }
 
     function updateStatus() {
@@ -1292,7 +1327,7 @@
                 document.getElementById('rssi').textContent     = data.rssi;
                 document.getElementById('error').textContent    = data.errorName;
                 document.getElementById('currentAddr').textContent = data.addr;
-                showHeaterAge(data.ageSec);
+                showHeaterAge(data);
                 markFresh();
             })
             .catch(markStale);

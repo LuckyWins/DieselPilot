@@ -2665,6 +2665,11 @@ void handleAPI_Status() {
     // with a dead CC1101 these readings can be hours old and look live.
     // Cast before the ternary: the other branch is unsigned, and -1 would be
     // converted to 4294967295 instead of staying the "never heard" marker.
+    // A silent radio and a heater that has not answered look identical from
+    // here -- both give no readings -- but only one of them is the
+    // controller's own fault, and only one is fixed by touching the wiring.
+    json += "\"rfFault\":" + String(cc1101Fault ? "true" : "false") + ",";
+    json += "\"paired\":" + String(heaterPaired ? "true" : "false") + ",";
     json += "\"fuelMl\":" + String(fuelMlFromTicks(fuelTicks)) + ",";
     json += "\"ageSec\":" + String(heaterStatus.lastUpdate
                 ? (long)((millis() - heaterStatus.lastUpdate) / 1000) : -1L);
