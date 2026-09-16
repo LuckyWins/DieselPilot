@@ -5,16 +5,49 @@ here; this is only what to come back to.
 
 ---
 
+## Blocking
+
+- [ ] **The CC1101 does not work. Almost certainly the module, not the code.**
+
+      Bench findings, so they do not have to be established again:
+
+      - It is powered and wired. With CSn high it releases MISO; with CSn low
+        it drives the line high hard enough to beat an internal pulldown, and
+        that behaviour follows CSn, so MISO, CSn, VCC and GND are all good.
+      - SO stays high while selected, which per the datasheet means the chip
+        never reports ready — the crystal is not starting.
+      - The manual reset sequence from datasheet section 19.1 does not help,
+        and neither does dropping SPI to 100 kHz. Both were tried.
+      - Upstream `main` does not fix it either: it hangs the controller dead
+        in `while(digitalRead(PIN_MISO));` instead, which is what this fork's
+        bounded wait was added for.
+
+      SCK and MOSI remain unverified — nothing gets that far while the chip is
+      not ready. Left to try: reseat the two power jumpers on different wires,
+      a 100 nF ceramic across VCC and GND at the module. Then replace it.
+      Order two: for something that ends up a hundred kilometres away, a spare
+      radio belongs in the drawer regardless.
+
+---
+
 ## Verify on real hardware
 
 - [ ] **OTA through Telegram.** `AsyncTelegram2` claims firmware updates by
-      sending the file to the bot. If it works, remote updates need no public
-      IP at all, and the MTS "static name" service is unnecessary.
+      sending the file to the bot. Less pressing now that updates over the
+      local network are proven to work, firmware and filesystem both, with the
+      new image rolling itself back if it cannot be reached. This is the tier
+      below that: what to do when the device is up but not reachable on the
+      local network at all.
 - [ ] **Whether TCP is reused between `getUpdates` calls.** Traffic differs by
       a factor of twelve: roughly 37 MB/month with a reused connection against
       430 MB/month if every poll does a TLS handshake.
 - [ ] **How long a TLS handshake actually takes** on a poor link — needed to
       pick the watchdog timeout.
+
+      Measured at home, on a good link: the longest loop iteration is 3 230 ms
+      at the moment the bot connects, settling to about 900 ms afterwards.
+      Against a 60 s watchdog that is comfortable, but the garage runs over
+      LTE and that is the number that decides.
 - [ ] **Which protocol version this heater actually speaks**, and how its
       power ladder behaves. `/level` walks V1 straight to the level, because
       the V1 frame carries it. The V2 frame has no level number at all, only
@@ -46,6 +79,10 @@ here; this is only what to come back to.
       free heap since boot and the longest loop iteration. The minimum heap is
       the one that matters: a slow leak or fragmentation shows up there long
       before anything visibly breaks.
+
+      First readings, minutes of uptime on the bench: 170 KB free, 163 KB
+      minimum, longest loop 909 ms once the bot has settled. Nothing to judge
+      a leak by yet — that needs days, not minutes.
 
       After a week of uptime, look at the figures and decide whether they
       deserve a threshold with a notification, a line on the display, or
