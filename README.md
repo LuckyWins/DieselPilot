@@ -74,8 +74,10 @@ More detail, including manual pairing, lives on the
   whether it comes from the chat, the web GUI or the schedule
 - Ignition is verified rather than assumed: a command that did not light the
   heater is retried, then reported
-- Task watchdog, plus bounded SPI waits so an unplugged CC1101 cannot hang the
-  controller during boot
+- Task watchdog, plus bounded SPI waits and a probed display, so neither an
+  unplugged CC1101 nor a dead panel can hang the controller during boot
+- Firmware from an over-the-air update is confirmed only once it has come back
+  and can be reached; otherwise the bootloader restores the previous image
 - Wi-Fi supervision: a dropped link is retried with exponential backoff, and
   a network that was missing at boot is retried once a minute from behind the
   fallback access point — after a power cut the controller is awake long
@@ -222,6 +224,16 @@ make ota IP=192.168.1.50                    # add OTA_PASS=… if one is set
 
 Put `IP`, `OTA_PASS` and the MQTT credentials in `Makefile.local` to avoid
 retyping them. That file is gitignored.
+
+**A new image has to prove itself.** Firmware arriving over the air is booted
+on probation: it is not confirmed until it has joined the network and the bot
+has reached Telegram. Five minutes without that and the controller reboots
+without confirming, and the bootloader starts the previous image instead.
+
+The support is in the bootloader, but the Arduino core hands out that
+confirmation inside `initArduino()`, before `setup()` has run — so any image
+that reached `main()` counted as good, including one that boots and then
+cannot be talked to. Which is the only kind worth rolling back.
 
 ### Flashing without PlatformIO
 

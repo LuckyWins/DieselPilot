@@ -72,23 +72,6 @@ here; this is only what to come back to.
 
 ## Remote access
 
-- [ ] **Make OTA rollback actually work.** The protection exists in the
-      bootloader (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=1`) but is completely
-      defeated: the core calls `verifyOta()`, which returns `true` by default,
-      and confirms any uploaded image inside `initArduino()` — before the
-      sketch's own `setup()` ever runs.
-
-      The fix is to override the weak symbol `verifyRollbackLater()` to return
-      `true`. That defers the verdict, and the image is then confirmed by our
-      own code — only once the network is up and the bot has reached Telegram,
-      say. No confirmation within N minutes means a reboot, and the bootloader
-      restores the previous firmware.
-
-      It composes well with the watchdog: a new firmware that hangs gets
-      rebooted by the timer and, never having confirmed itself, rolls back.
-      Turns "flashed something broken over the air" from a hundred-kilometre
-      drive into self-recovery.
-
 - [ ] **MQTT + Home Assistant.** The MQTT code is already there and completely
       inert until a broker address is set. Entering one is all it takes. Worth
       it if graphs, history and automations are ever wanted.

@@ -37,6 +37,7 @@
 #include <LittleFS.h>
 #include <ArduinoOTA.h>          // OTA firmware updates (espota protocol)
 #include <esp_task_wdt.h>        // Hardware watchdog
+#include <esp_ota_ops.h>         // Rollback of an update that does not come back
 
 #include "protocol.h"           // States, error codes, CRC, frequency maths
 #include "settings.h"           // Settings form parsing
@@ -129,6 +130,10 @@
 // up. The boot attempt gets ten seconds, and after the nightly power cut the
 // controller is awake long before an LTE modem has finished registering, so
 // it loses that race nearly every time.
+// How long a freshly flashed image has to prove it can still be reached
+// before the bootloader is allowed to put the old one back.
+#define OTA_VERIFY_WINDOW_MS 300000UL
+
 #define WIFI_AP_RETRY_MS 60000
 
 #define WIFI_RETRY_MIN_MS 5000
@@ -2459,6 +2464,66 @@ void superviseWiFi() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Initialize OTA subsystem (called from setup after WiFi, and on enable)
+// ═══════════════════════════════════════════════════════════════════════════
+// OTA ROLLBACK
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The bootloader can put the previous firmware back when a new one fails to
+// come up, and the support is compiled in -- but the Arduino core defeats it.
+// initArduino() runs before setup(), and unless verifyRollbackLater() says
+// otherwise it calls esp_ota_mark_app_valid_cancel_rollback() straight away,
+// declaring any image that reached main() a good one. An image that boots and
+// then cannot reach the network is exactly the one worth rolling back, and it
+// passes that test with room to spare.
+//
+// Overriding the weak symbol defers the verdict to code that can actually
+// judge it. C linkage: the core declares it in a .c file.
+extern "C" bool verifyRollbackLater() { return true; }
+
+// True while this image is on probation.
+static bool     otaPendingVerify   = false;
+static uint32_t otaVerifyDeadline  = 0;
+
+void setupOtaVerify() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+
+    if(esp_ota_get_state_partition(running, &state) != ESP_OK) return;
+    if(state != ESP_OTA_IMG_PENDING_VERIFY) return;
+
+    otaPendingVerify  = true;
+    otaVerifyDeadline = millis() + OTA_VERIFY_WINDOW_MS;
+    Serial.println("OTA: new image on probation, must prove it is reachable");
+}
+
+// The test is reachability, because that is the whole point: firmware that
+// runs but cannot be talked to is indistinguishable from a brick at a hundred
+// kilometres. A device with no station network configured, or with no bot, is
+// judged on what it does have -- otherwise it could never accept an update at
+// all.
+void updateOtaVerify() {
+    if(!otaPendingVerify) return;
+
+    bool networkUp = (staSSID.length() == 0) || (WiFi.status() == WL_CONNECTED);
+    bool botUp     = !tgEnabled || tgReady;
+
+    if(networkUp && botUp) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        otaPendingVerify = false;
+        Serial.println("OTA: image confirmed, rollback cancelled");
+        notifyTelegram("✅ New firmware confirmed — it came back and can be reached");
+        return;
+    }
+
+    if((int32_t)(millis() - otaVerifyDeadline) < 0) return;
+
+    // Reboot without confirming. The bootloader finds an image that never
+    // vouched for itself and starts the previous one instead.
+    Serial.println("OTA: image never became reachable — rebooting to roll back");
+    delay(100);
+    ESP.restart();
+}
+
 void setupOTA() {
     if(!otaEnabled || otaRunning) return;
 
@@ -3332,6 +3397,8 @@ void setup() {
         Serial.println("⚠️ Watchdog init failed");
     }
 
+    setupOtaVerify();
+
     // Queued until the bot connects. esp_reset_reason() turns a useless
     // "I am up" into diagnostics: power back after the nightly cut is normal,
     // a watchdog reset means something is hanging.
@@ -3390,6 +3457,7 @@ void loop() {
         updateIgnitionLog();
         updateLevel();
         updateScheduledStart();
+        updateOtaVerify();
         updateNotifications();
         updateScheduler();
     }
