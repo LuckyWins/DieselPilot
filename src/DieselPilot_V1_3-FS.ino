@@ -42,6 +42,7 @@
 #include "settings.h"           // Settings form parsing
 #include "scheduler.h"          // Shutdown timers
 #include "notify.h"             // Whitelist, repeat suppression, backoff
+#include "stepper.h"            // Walking the power level up and down
 #include "json.h"               // Response string escaping
 
 #include <WiFiClientSecure.h>
@@ -96,6 +97,20 @@
 #define HEATER_POLL_BOOST_MS 60000
 // Beyond this the last reading is history, not the current state.
 #define HEATER_DATA_FRESH_MS 20000
+
+// Stepping the power level. One step is given two poll intervals to appear in
+// the reading: the poll runs at HEATER_POLL_FAST_MS after a command, and a
+// single dropped frame should not be read as a ladder that will not move.
+#define STEP_SETTLE_MS   (HEATER_POLL_FAST_MS * 2)
+// Enough for a walk down a six-rung ladder and back up it, with room to spare.
+#define STEP_MAX_STEPS   16
+#define STEP_DEADLINE_MS 180000
+// Power levels on the panel, and the range a target temperature is accepted
+// in. The heater's own limits are discovered by stepping into them; these
+// only reject a typo before any command goes out.
+#define LEVEL_MAX  6
+#define TEMP_MIN_C 5
+#define TEMP_MAX_C 35
 
 // Telegram polls fast while someone is pressing buttons and slowly otherwise.
 // A fixed rate has to choose between a sluggish keyboard and wasted data.
@@ -998,6 +1013,9 @@ extern bool     startArmed;
 extern uint32_t startTarget;
 String   clockOfPublic(uint32_t epoch);
 
+// Defined further down, with the power level walk.
+bool     startLevelChange(int64_t chatId, const String& cmd, String& reply);
+
 static String tgStatusText() {
     String m = "🔥 Diesel Pilot\n\n";
 
@@ -1083,6 +1101,8 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
             "/in 2h - start after that delay\n"
             "/cancel - drop a pending scheduled start\n"
             "/for 90 - run for 90 minutes this time only\n"
+            "/level 4 - set the power level (MANUAL)\n"
+            "/temp 22 - set the target temperature (AUTO)\n"
             "/id - show your chat id");
         return;
     }
@@ -1099,6 +1119,13 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
         tgBot.sendTo(chatId, want == 0
             ? "Runtime limit off for this burn"
             : "Runtime limit set to " + String(want) + " min for this burn");
+        return;
+    }
+
+    if(cmd.startsWith("/level ") || cmd.startsWith("/temp ")) {
+        String reply;
+        startLevelChange(chatId, cmd, reply);
+        tgBot.sendTo(chatId, reply);
         return;
     }
 
@@ -1306,6 +1333,171 @@ void updateIgnition() {
             break;
 
         case IGN_NONE:
+        default:
+            break;
+    }
+}
+
+// ── Power level ────────────────────────────────────────────────────────────
+//
+// Setting a level used to mean pressing +1 six times and waiting out a poll
+// after each. The walk itself lives in stepper.h; what is walked depends on
+// the heater, and the V2 frame carries no level number at all.
+
+// Where a level change has got to. The V2 walk is two-phase: down to the
+// bottom of the ladder, then up to the rung asked for.
+enum LevelPhase { LVL_IDLE = 0, LVL_SEEK, LVL_FLOOR, LVL_CLIMB };
+
+static StepperState levelStepper;
+static LevelPhase   levelPhase  = LVL_IDLE;
+static int          levelWanted = 0;
+static int64_t      levelChat   = 0;   // who asked, and who gets the verdict
+
+// The number the heater reports and that UP/DOWN move by one.
+static int levelReading() {
+    if(heaterStatus.autoMode) return heaterStatus.setpoint;
+    if(heaterVersion == "V1") return heaterStatus.power;
+    return heaterStatus.pumpFreq;      // V2 manual: the pump rate is all there is
+}
+
+// The same number in the units the user thinks in.
+static String levelCurrentText() {
+    if(heaterStatus.autoMode) return String(heaterStatus.setpoint) + " C";
+    if(heaterVersion == "V1") return "level " + String(heaterStatus.power);
+    return String(heaterStatus.pumpFreq / 10.0, 1) + " Hz";
+}
+
+static void levelReply(const String& text) {
+    if(levelChat != 0 && tgEnabled && tgReady) tgBot.sendTo(levelChat, text);
+    else                                       notifyTelegram(text);
+}
+
+static void levelAbandon(const String& why) {
+    stepperStop(levelStepper);
+    levelPhase = LVL_IDLE;
+    levelReply(why);
+}
+
+// Starts a walk, or explains why it cannot. The reply to the command is
+// immediate; the verdict arrives when the walk finishes, seconds later.
+bool startLevelChange(int64_t chatId, const String& cmd, String& reply) {
+    bool wantTemp = cmd.startsWith("/temp");
+    int  space    = cmd.indexOf(' ');
+    int  value    = (space > 0) ? cmd.substring(space + 1).toInt() : 0;
+
+    if(!heaterPaired) { reply = "Heater is not paired."; return false; }
+    if(cc1101Fault)   { reply = "RF module is not responding."; return false; }
+
+    // Every step is judged against the reported reading, and a stopped heater
+    // does not report one worth steering by.
+    if(heaterStatus.state == STATE_OFF) {
+        reply = "Heater is off — start it first. The level is walked against "
+                "the heater's own reading, and a stopped heater has none.";
+        return false;
+    }
+    if(levelPhase != LVL_IDLE) {
+        reply = "A level change is already under way";
+        return false;
+    }
+    if(wantTemp != heaterStatus.autoMode) {
+        reply = heaterStatus.autoMode
+            ? "The heater is in AUTO — /temp sets the target temperature"
+            : "The heater is in MANUAL — /level sets the power level";
+        return false;
+    }
+
+    if(wantTemp) {
+        if(value < TEMP_MIN_C || value > TEMP_MAX_C) {
+            reply = "Use /temp " + String(TEMP_MIN_C) + ".." + String(TEMP_MAX_C);
+            return false;
+        }
+        levelPhase = LVL_SEEK;
+        stepperStart(levelStepper, STEP_SEEK, value, 0, millis());
+        reply = "Walking the setpoint to " + String(value) + " C from " +
+                levelCurrentText();
+    } else {
+        if(value < 1 || value > LEVEL_MAX) {
+            reply = "Use /level 1.." + String(LEVEL_MAX);
+            return false;
+        }
+        levelWanted = value;
+        if(heaterVersion == "V1") {
+            // V1 reports the level outright, so it can be steered for.
+            levelPhase = LVL_SEEK;
+            stepperStart(levelStepper, STEP_SEEK, value, 0, millis());
+        } else {
+            // V2 does not, so the ladder is walked from its bottom instead.
+            // Slower, but it needs no table of pump rates and cannot be wrong
+            // about a heater whose ladder is not the one we guessed.
+            levelPhase = LVL_FLOOR;
+            stepperStart(levelStepper, STEP_FLOOR, 0, -1, millis());
+        }
+        reply = "Walking to level " + String(value) + " from " + levelCurrentText();
+    }
+
+    levelChat = chatId;
+    return true;
+}
+
+void updateLevel() {
+    if(levelPhase == LVL_IDLE) return;
+
+    if(cc1101Fault) {
+        levelAbandon("Level change abandoned — the RF module stopped responding");
+        return;
+    }
+    // A heater that shut down mid-walk is no longer at a level worth setting,
+    // and every further step would be a toggle sent into the purge.
+    if(heaterStatus.state == STATE_OFF) {
+        levelAbandon("Level change abandoned — the heater stopped");
+        return;
+    }
+
+    StepperInput in;
+    in.reading    = levelReading();
+    in.dataFresh  = heaterStatus.lastUpdate != 0 &&
+                    (millis() - heaterStatus.lastUpdate) < HEATER_DATA_FRESH_MS;
+    in.nowMs      = millis();
+    in.settleMs   = STEP_SETTLE_MS;
+    in.deadlineMs = STEP_DEADLINE_MS;
+    in.maxSteps   = STEP_MAX_STEPS;
+
+    switch(stepperNext(levelStepper, in)) {
+        case STEPPER_UP:   sendCommand(CMD_UP);   break;
+        case STEPPER_DOWN: sendCommand(CMD_DOWN); break;
+
+        case STEPPER_DONE:
+            // Reaching the bottom is only half the V2 walk: the climb from it
+            // is what actually selects the level.
+            if(levelPhase == LVL_FLOOR) {
+                levelPhase = LVL_CLIMB;
+                stepperStart(levelStepper, STEP_COUNT, levelWanted - 1, +1, millis());
+            } else {
+                levelPhase = LVL_IDLE;
+                levelReply("✅ Now at " + levelCurrentText());
+            }
+            break;
+
+        case STEPPER_STUCK:
+            levelPhase = LVL_IDLE;
+            levelReply("Stopped at " + levelCurrentText() +
+                       " — the heater would not step any further");
+            break;
+
+        case STEPPER_WRAPPED:
+            levelPhase = LVL_IDLE;
+            levelReply("The level rolls over at the end of its range instead of "
+                       "stopping, so it cannot be walked to a fixed value. "
+                       "Now at " + levelCurrentText() + " — use the ± buttons.");
+            break;
+
+        case STEPPER_EXHAUSTED:
+            levelPhase = LVL_IDLE;
+            levelReply("Gave up after " + String(STEP_MAX_STEPS) + " steps at " +
+                       levelCurrentText());
+            break;
+
+        case STEPPER_WAIT:
         default:
             break;
     }
@@ -2377,6 +2569,7 @@ void loop() {
         updateFuel();
         updateProgressReport();
         updateIgnition();
+        updateLevel();
         updateScheduledStart();
         updateNotifications();
         updateScheduler();
