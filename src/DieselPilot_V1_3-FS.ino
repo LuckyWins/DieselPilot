@@ -118,6 +118,11 @@
 // A fixed rate has to choose between a sluggish keyboard and wasted data.
 #define TG_POLL_ACTIVE_MS  3000
 #define TG_POLL_BOOST_MS  60000
+// A gentler rate for the whole time the heater is lit. Not the full active
+// rate: a burn lasts a couple of hours, and twenty times the requests for
+// all of it is a poor trade until it is known whether the connection is
+// actually reused between polls -- see TODO.
+#define TG_POLL_BURN_MS   10000
 
 // Accepted range for a hand-entered frequency, in hertz. The CC1101 covers
 // several bands; anything outside this is a typo, most often kilohertz.
@@ -319,9 +324,10 @@ AsyncTelegram2   tgBot(tgClient);
 bool   tgReady   = false;
 String tgPending = "";     // produced before the bot became reachable
 
-// Idle polling interval for incoming commands. The bot drops to
-// TG_POLL_ACTIVE_MS for a minute after each message, so this rate only
-// governs the quiet hours -- which on a metered plan is where the data goes.
+// Idle polling interval for incoming commands. It only governs the quiet
+// hours -- which on a metered plan is where the data goes -- because the bot
+// speeds up whenever something is happening: after any message in either
+// direction, and for as long as the heater is lit.
 uint16_t tgPollSec = 60;
 
 // Temporary window during which the bot answers /id to anyone, so the owner
@@ -1108,6 +1114,13 @@ const char* resetReasonName(esp_reset_reason_t r) {
 }
 
 static void tgSendToAll(const String& text) {
+    // Anything the device says is something the owner may well reply to --
+    // the boot notice, an ignition, a fault. Waiting out the idle interval
+    // after one of those is exactly the wrong moment to be slow, and it was
+    // a closed circle: the rate only rose once a message had got through,
+    // and the first one always waited the full minute.
+    lastTgActivityMs = millis();
+
     std::vector<int64_t> ids = parseChatList(std::string(tgChats.c_str()));
     for(size_t i = 0; i < ids.size(); i++) {
         if(!tgBot.sendTo(ids[i], text.c_str())) {
@@ -1585,11 +1598,22 @@ void updateTelegramPollRate() {
     bool discovering = tgDiscoverUntilMs != 0 &&
                        (int32_t)(tgDiscoverUntilMs - millis()) > 0;
 
-    uint32_t want = (discovering ||
-                     (lastTgActivityMs != 0 &&
-                      millis() - lastTgActivityMs < TG_POLL_BOOST_MS))
-                  ? TG_POLL_ACTIVE_MS
-                  : (uint32_t)tgPollSec * 1000UL;
+    bool recent = lastTgActivityMs != 0 &&
+                  millis() - lastTgActivityMs < TG_POLL_BOOST_MS;
+
+    uint32_t idle = (uint32_t)tgPollSec * 1000UL;
+    uint32_t want;
+
+    if(discovering || recent) {
+        want = TG_POLL_ACTIVE_MS;
+    } else if(heaterStatus.state != STATE_OFF) {
+        // A burning heater is when commands get sent: check on it, change the
+        // level, stop it early. Never slower than the configured rate, in
+        // case that is already brisker than this.
+        want = (idle < TG_POLL_BURN_MS) ? idle : TG_POLL_BURN_MS;
+    } else {
+        want = idle;
+    }
 
     if(want == tgCurrentPollMs) return;
     tgCurrentPollMs = want;
