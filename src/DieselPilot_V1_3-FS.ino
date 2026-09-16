@@ -125,6 +125,12 @@
 
 // Wi-Fi reconnect backoff bounds. The garage sits on the edge of town and
 // the link can be down for hours, so retries back off instead of hammering.
+// How often to try the configured network while the fallback access point is
+// up. The boot attempt gets ten seconds, and after the nightly power cut the
+// controller is awake long before an LTE modem has finished registering, so
+// it loses that race nearly every time.
+#define WIFI_AP_RETRY_MS 60000
+
 #define WIFI_RETRY_MIN_MS 5000
 #define WIFI_RETRY_MAX_MS 300000
 
@@ -2376,7 +2382,37 @@ void updateScheduler() {
 // the only remote control channel, a link that fails to come back means the
 // device is unreachable until someone drives out to the garage.
 void superviseWiFi() {
-    if(useAP || staSSID.length() == 0) return;   // nothing to reconnect to
+    if(staSSID.length() == 0) return;            // nothing to reconnect to
+
+    // Fell back to the access point because the network was not there at boot.
+    // It may well turn up later -- a modem that takes a minute to register is
+    // the normal case here, not the exception -- so keep asking rather than
+    // waiting for somebody to drive out and power-cycle the board.
+    //
+    // The access point stays up while trying. The ESP32 can hold both at once,
+    // and shutting the owner out while hunting for a network that may not even
+    // be configured correctly would trade one lockout for another.
+    if(useAP) {
+        if(WiFi.status() == WL_CONNECTED) {
+            useAP = false;
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_STA);
+            displayLine2 = "IP:";
+            displayLine3 = WiFi.localIP().toString();
+            Serial.println("✅ WiFi joined late: " + WiFi.localIP().toString());
+            notifyTelegram("📶 Joined " + staSSID + " — " +
+                           WiFi.localIP().toString());
+            return;
+        }
+
+        static unsigned long lastApRetry = 0;
+        if(millis() - lastApRetry < WIFI_AP_RETRY_MS) return;
+        lastApRetry = millis();
+
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.begin(staSSID.c_str(), staPassword.c_str());
+        return;
+    }
 
     static unsigned long lastAttempt = 0;
     static unsigned long backoffMs   = WIFI_RETRY_MIN_MS;

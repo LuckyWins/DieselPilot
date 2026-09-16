@@ -27,7 +27,7 @@ reliability and a test suite. See [What this fork changes](#what-this-fork-chang
 | Fuel | — | Consumption integrated from the pump, and what is left in the tank |
 | State across reboots | — | Counters, error log and ignition log in NVS, so the nightly power cut costs nothing |
 | Hang protection | — | Task watchdog, bounded CC1101 SPI waits, module self-test |
-| Network recovery | Connect once at boot | Supervised Wi-Fi with exponential backoff |
+| Network recovery | Connect once at boot | Supervised Wi-Fi: exponential backoff on a dropped link, and the fallback access point keeps hunting for the real network instead of sitting there until somebody reboots it |
 | Settings forms | A blank field erased the stored value | Blank keeps, `__CLEAR__` erases |
 | Web API | Open to any cross-origin request | Mutating endpoints require a custom header and POST |
 | Tests | None | 170 host-side cases, no hardware needed |
@@ -76,7 +76,11 @@ More detail, including manual pairing, lives on the
   heater is retried, then reported
 - Task watchdog, plus bounded SPI waits so an unplugged CC1101 cannot hang the
   controller during boot
-- Wi-Fi supervision with exponential backoff
+- Wi-Fi supervision: a dropped link is retried with exponential backoff, and
+  a network that was missing at boot is retried once a minute from behind the
+  fallback access point — after a power cut the controller is awake long
+  before an LTE modem has registered, and losing that race used to mean
+  sitting in access-point mode, unreachable, until the next reboot
 - CC1101 presence check via the VERSION register
 
 **Monitoring**
