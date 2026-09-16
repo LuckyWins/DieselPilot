@@ -2778,12 +2778,24 @@ void updateDisplay() {
     display.setFont(u8g2_font_5x8_tf);
     display.drawStr(2, 52, displayLine4.c_str());
 
-    if(heaterPaired && heaterStatus.lastUpdate > 0) {
-        String footer = useAP ? "AP " : "WiFi ";
-        if(mqttEnabled && mqtt.connected())   footer += "| MQTT ";
-        if(otaEnabled)                        footer += "| OTA";
-        display.drawStr(2, 63, footer.c_str());
-    }
+    // The address is the one thing on this screen that cannot be looked up
+    // anywhere else, so it goes on every screen rather than only on the one
+    // with room to spare. It used to say "WiFi", which carries no
+    // information: an address implies the network, and AP mode announces
+    // itself. And it was drawn only while the heater was reporting -- so it
+    // vanished exactly when the controller was working normally, and was
+    // visible only before pairing, when nobody needs it.
+    String footer;
+    if(useAP)                              footer = "AP " + WiFi.softAPIP().toString();
+    else if(WiFi.status() == WL_CONNECTED) footer = WiFi.localIP().toString();
+    else                                   footer = "no network";
+
+    // 128 px of 5x8 glyphs is 25 characters. The flags go on only while they
+    // fit, because the address is what somebody standing here came for.
+    if(mqttEnabled && mqtt.connected() && footer.length() + 7 <= 25) footer += " | MQTT";
+    if(otaEnabled && footer.length() + 6 <= 25)                      footer += " | OTA";
+
+    display.drawStr(2, 63, footer.c_str());
     display.sendBuffer();
 #endif
 }
@@ -3658,10 +3670,15 @@ void loop() {
             displayLine4 = String(heaterStatus.voltage / 10.0, 1) + "V  [" + modeIcon + "]  " + String(heaterStatus.caseTemp) + "C";
 
         } else if(heaterPaired) {
-            displayLine1 = "DIESEL PILOT";
+            displayLine1 = "DIESEL PILOT " + version;
             displayLine2 = "Waiting...";
             displayLine3 = "No data";
             displayLine4 = "";
+        } else {
+            displayLine1 = "DIESEL PILOT " + version;
+            displayLine2 = "Not paired";
+            displayLine3 = "Pair from the";
+            displayLine4 = "web interface";
         }
 
         updateDisplay();
