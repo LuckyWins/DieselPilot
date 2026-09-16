@@ -43,6 +43,7 @@
 #include "scheduler.h"          // Shutdown timers
 #include "notify.h"             // Whitelist, repeat suppression, backoff
 #include "stepper.h"            // Walking the power level up and down
+#include "stats.h"              // Counters and history that outlive a reboot
 #include "json.h"               // Response string escaping
 
 #include <WiFiClientSecure.h>
@@ -233,6 +234,22 @@ uint16_t sessionAutoOffMin = 0;
 uint32_t fuelTicks  = 0;
 uint16_t fuelDoseUl = FUEL_DOSE_UL_DEFAULT;
 
+// What each start looked like. The retry watcher gives up as soon as the
+// heater acknowledges the command; what says something about the glow plug is
+// what happens after that, so this is measured separately.
+static uint8_t ignRing[RING_HEADER_BYTES + IGN_LOG_CAPACITY * IGN_RECORD_BYTES];
+static bool     ignLogActive     = false;
+static uint32_t ignLogStartMs    = 0;
+static uint16_t ignLogVoltBefore = 0;
+static uint16_t ignLogVoltMin    = 0;
+static int8_t   ignLogAmbient    = 0;
+
+// Lifetime counters, loaded from NVS at boot. Declared here because a start
+// is counted in heaterEnsureOn(), long before the persistence code below.
+Counters counters;
+static bool     countersDirty   = false;
+static uint32_t countersFlushMs = 0;
+
 uint16_t voltAlarmDeciV = VOLT_ALARM_DECIV_DEFAULT;
 uint16_t voltClearDeciV = VOLT_CLEAR_DECIV_DEFAULT;
 uint16_t voltDebounceS  = VOLT_DEBOUNCE_SEC_DEFAULT;
@@ -248,6 +265,12 @@ uint16_t voltDebounceS  = VOLT_DEBOUNCE_SEC_DEFAULT;
 // the "not heating" warning hangs off it: too early and a cold heat
 // exchanger raises false alarms, too late and the driver has already
 // arrived.
+// Hours of running between services, 0 = no reminder. Deliberately off by
+// default: how long these heaters go between decokings depends on the model
+// and on the fuel, and a figure invented here would be a notification built
+// on a guess. Set it once there is enough of this device's own history.
+uint16_t serviceHours = 0;
+
 uint16_t reportFirstMin = 30;
 uint16_t reportRptMin   = 0;
 
@@ -324,13 +347,10 @@ struct {
     unsigned long lastUpdate = 0;
 } heaterStatus;
 
-// Error History
-struct ErrorHistoryEntry {
-    uint8_t errorCode;
-    unsigned long timestamp;
-};
-ErrorHistoryEntry errorHistory[10];
-int errorHistoryIndex = 0;
+// Error history. In NVS rather than RAM: the power goes every night, and a
+// fault at 21:50 used to leave no trace by morning.
+static uint8_t errRing[RING_HEADER_BYTES + ERR_LOG_CAPACITY * ERR_RECORD_BYTES];
+static uint8_t errLastCode = ERR_NONE;
 
 // Display
 String displayLine1 = "Diesel Pilot";
@@ -356,10 +376,20 @@ bool   otaRunning  = false;             // ArduinoOTA.begin() has been called
 
 void addErrorToHistory(uint8_t errorCode) {
     if(errorCode == ERR_NONE) return;
-    if(errorHistoryIndex > 0 && errorHistory[(errorHistoryIndex - 1) % 10].errorCode == errorCode) return;
-    errorHistory[errorHistoryIndex % 10].errorCode = errorCode;
-    errorHistory[errorHistoryIndex % 10].timestamp = millis();
-    errorHistoryIndex++;
+    // The heater is polled every few seconds, so without this one fault would
+    // fill the whole ring in under a minute. It is also what keeps the NVS
+    // write below down to one per distinct fault.
+    if(errorCode == errLastCode) return;
+    errLastCode = errorCode;
+
+    ErrorRecord r;
+    r.epoch = timeValid ? (uint32_t)time(nullptr) : 0;
+    r.code  = errorCode;
+
+    uint8_t packed[ERR_RECORD_BYTES];
+    if(!errPack(r, packed, sizeof(packed))) return;
+    ringPush(errRing, ERR_LOG_CAPACITY, ERR_RECORD_BYTES, packed);
+    prefs.putBytes("errlog", errRing, sizeof(errRing));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -771,8 +801,10 @@ bool heaterEnsureOff() {
     if(!heaterPaired) return false;
     if(heaterIsOffOrStopping(heaterStatus.state)) return false;
     // A stop cancels any ignition still being verified, otherwise the retry
-    // would fight the shutdown that was just ordered.
-    ignWatching = false;
+    // would fight the shutdown that was just ordered. It also abandons the
+    // measurement: a start somebody interrupted says nothing about the plug.
+    ignWatching  = false;
+    ignLogActive = false;
     sendCommand(CMD_POWER);
     return true;
 }
@@ -821,6 +853,15 @@ StartVerdict heaterEnsureOn() {
     ignWatching      = true;
     ignAttempts      = 1;
     ignCommandedAtMs = millis();
+    counters.starts++;
+    countersDirty = true;
+
+    ignLogActive     = true;
+    ignLogStartMs    = millis();
+    ignLogVoltBefore = heaterStatus.voltage;
+    ignLogVoltMin    = heaterStatus.voltage;
+    ignLogAmbient    = heaterStatus.ambientTemp;
+
     return START_ALLOWED;
 }
 
@@ -1016,6 +1057,13 @@ String   clockOfPublic(uint32_t epoch);
 // Defined further down, with the power level walk.
 bool     startLevelChange(int64_t chatId, const String& cmd, String& reply);
 
+// Defined further down, with the counters.
+String   mlText(uint32_t ml);
+String   statsText();
+String   ignText();
+void     persistStats();
+extern Counters counters;
+
 static String tgStatusText() {
     String m = "🔥 Diesel Pilot\n\n";
 
@@ -1103,6 +1151,9 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
             "/for 90 - run for 90 minutes this time only\n"
             "/level 4 - set the power level (MANUAL)\n"
             "/temp 22 - set the target temperature (AUTO)\n"
+            "/stats - hours, fuel and starts\n"
+            "/ign - how the last few starts went\n"
+            "/service done - reset the counters since the last service\n"
             "/id - show your chat id");
         return;
     }
@@ -1119,6 +1170,31 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
         tgBot.sendTo(chatId, want == 0
             ? "Runtime limit off for this burn"
             : "Runtime limit set to " + String(want) + " min for this burn");
+        return;
+    }
+
+    if(cmd == "/stats") {
+        tgBot.sendTo(chatId, statsText());
+        return;
+    }
+
+    if(cmd == "/ign") {
+        tgBot.sendTo(chatId, ignText());
+        return;
+    }
+
+    // Spelt out rather than a bare /service, because one stray tap should not
+    // silently wipe the only record of when the burner was last cleaned.
+    if(cmd.startsWith("/service")) {
+        if(cmd != "/service done") {
+            tgBot.sendTo(chatId, "Send /service done to reset the counters since "
+                                 "the last service");
+            return;
+        }
+        countersMarkService(counters, timeValid ? (uint32_t)time(nullptr) : 0);
+        countersDirty = true;
+        persistStats();
+        tgBot.sendTo(chatId, "🔧 Service recorded — counters since it start again");
         return;
     }
 
@@ -1249,6 +1325,319 @@ void updateFuel() {
     lastState = heaterStatus.state;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PERSISTENT COUNTERS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// RAM does not survive 22:00 here, so anything worth knowing in the morning
+// has to reach NVS before the power goes. Writes are batched rather than
+// continuous: one at the end of every burn, one every ten minutes while it
+// runs, and one before a scheduled shutdown. That comes to a handful a day,
+// which NVS wear levelling absorbs without noticing.
+
+#define STATS_FLUSH_MS 600000UL
+
+// Ticks already charged to the lifetime total. A mid-burn flush must not bill
+// the same fuel twice, and the sub-millilitre remainder stays here rather
+// than being rounded away once a second.
+static uint32_t fuelTicksBilled = 0;
+
+// Read from the stored flag at boot and resolved once the heater has actually
+// reported: still burning means the controller restarted underneath it, off
+// means the power went mid-burn.
+static bool bootDirtyPending = false;
+
+// Running time, in the units that suit its size. Hours for anything past a
+// day of use, which is where these counters spend their life.
+String hoursText(uint32_t seconds) {
+    if(seconds < 3600) return String(seconds / 60) + " min";
+    return String(seconds / 3600) + " h " + String((seconds % 3600) / 60) + " min";
+}
+
+// A date for the service log. Falls back when the clock had never synced at
+// the moment it was recorded.
+String dateOf(uint32_t epoch) {
+    if(epoch == 0) return "never";
+    time_t    t = (time_t)epoch;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    char buf[16];
+    // strftime rather than snprintf: the compiler cannot bound the tm fields
+    // and warns about a truncation that cannot actually happen.
+    strftime(buf, sizeof(buf), "%d.%m.%Y", &lt);
+    return String(buf);
+}
+
+// Millilitres read as litres once there are enough of them. Always with a
+// tilde at the call site: this is dead reckoning, not a gauge.
+String mlText(uint32_t ml) {
+    if(ml < 1000) return String(ml) + " ml";
+    return String(ml / 1000.0, 1) + " l";
+}
+
+// ── Ignition log ───────────────────────────────────────────────────────────
+
+// A start that has not lit in ten minutes is not going to.
+#define IGN_LOG_TIMEOUT_MS 600000UL
+
+void loadErrLog() {
+    size_t len = prefs.getBytes("errlog", errRing, sizeof(errRing));
+    if(!ringValid(errRing, len, ERR_LOG_CAPACITY, ERR_RECORD_BYTES,
+                  ERR_LOG_VERSION)) {
+        ringInit(errRing, ERR_LOG_CAPACITY, ERR_RECORD_BYTES, ERR_LOG_VERSION);
+    }
+}
+
+void loadIgnLog() {
+    size_t len = prefs.getBytes("ignlog", ignRing, sizeof(ignRing));
+    if(!ringValid(ignRing, len, IGN_LOG_CAPACITY, IGN_RECORD_BYTES,
+                  IGN_LOG_VERSION)) {
+        ringInit(ignRing, IGN_LOG_CAPACITY, IGN_RECORD_BYTES, IGN_LOG_VERSION);
+    }
+}
+
+// Date and time in the form a log line wants it.
+String stampOf(uint32_t epoch) {
+    if(epoch == 0) return "  --   --  ";
+    time_t    t = (time_t)epoch;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    char buf[16];
+    strftime(buf, sizeof(buf), "%d.%m %H:%M", &lt);
+    return String(buf);
+}
+
+static void recordIgnition(uint8_t outcome, uint16_t seconds) {
+    IgnitionRecord r;
+    r.epoch        = timeValid ? (uint32_t)time(nullptr) : 0;
+    r.seconds      = seconds;
+    r.voltBeforeDv = ignLogVoltBefore;
+    r.voltMinDv    = ignLogVoltMin;
+    r.ambientC     = ignLogAmbient;
+    r.attempts     = ignAttempts;
+    r.outcome      = outcome;
+
+    uint8_t packed[IGN_RECORD_BYTES];
+    if(!ignPack(r, packed, sizeof(packed))) return;
+    ringPush(ignRing, IGN_LOG_CAPACITY, IGN_RECORD_BYTES, packed);
+    prefs.putBytes("ignlog", ignRing, sizeof(ignRing));
+
+    if(outcome != IGN_OUTCOME_LIT) { persistStats(); return; }
+
+    // Freeze what a healthy start looks like on this burner, from the first
+    // few after it was cleaned. The ring is far too short to still hold them
+    // by the time the comparison matters.
+    if(counters.baseIgnSamples < IGN_BASELINE_SAMPLES) {
+        counters.baseIgnSamples++;
+        countersDirty = true;
+        if(counters.baseIgnSamples == IGN_BASELINE_SAMPLES) {
+            IgnSummary base = ignSummarise(ignRing, IGN_BASELINE_SAMPLES);
+            counters.baseIgnSeconds = base.medianSeconds;
+            counters.baseIgnDropDv  = base.medianDropDv;
+        }
+        persistStats();
+        return;
+    }
+
+    IgnSummary recent = ignSummarise(ignRing, IGN_RECENT_SAMPLES);
+    bool bad = ignDegraded(recent, counters.baseIgnSeconds, counters.baseIgnDropDv);
+
+    // One message when it starts drifting, not one per start. A single slow
+    // ignition in a frost is weather, which is what the median is there for.
+    if(bad != counters.ignWarned) {
+        counters.ignWarned = bad;
+        countersDirty      = true;
+        notifyTelegram(bad
+            ? "🟠 Starts are getting worse: median " +
+              String(recent.medianSeconds) + " s and " +
+              String(recent.medianDropDv / 10.0, 1) + " V of sag, against " +
+              String(counters.baseIgnSeconds) + " s and " +
+              String(counters.baseIgnDropDv / 10.0, 1) + " V when it was last "
+              "serviced. Glow plug or a coked burner — /ign for the detail."
+            : "🟢 Starts are back to what they were after the last service");
+    }
+    persistStats();
+}
+
+void updateIgnitionLog() {
+    if(!ignLogActive) return;
+
+    bool fresh = heaterStatus.lastUpdate != 0 &&
+                 (millis() - heaterStatus.lastUpdate) < HEATER_DATA_FRESH_MS;
+
+    // The plug pulls eight to ten amps while it tries, and how far that drags
+    // the rail down is the measurement worth keeping.
+    if(fresh && heaterStatus.voltage > 0 &&
+       heaterStatus.voltage < ignLogVoltMin) {
+        ignLogVoltMin = heaterStatus.voltage;
+    }
+
+    bool lit     = fresh && heaterStatus.state == STATE_RUNNING;
+    bool gaveUp  = fresh && !ignWatching &&
+                   heaterIsOffOrStopping(heaterStatus.state);
+    bool timeout = millis() - ignLogStartMs > IGN_LOG_TIMEOUT_MS;
+
+    if(!lit && !gaveUp && !timeout) return;
+
+    recordIgnition(lit ? IGN_OUTCOME_LIT : IGN_OUTCOME_FAILED,
+                   (uint16_t)((millis() - ignLogStartMs) / 1000));
+    ignLogActive = false;
+}
+
+// The trend, and the last few starts it was drawn from.
+String ignText() {
+    String m = "🔌 Recent starts\n";
+
+    uint8_t count = ringCount(ignRing);
+    if(count == 0) return m + "Nothing logged yet";
+
+    uint8_t show = (count < 5) ? count : 5;
+    for(uint8_t i = 0; i < show; i++) {
+        IgnitionRecord r;
+        if(!ignUnpack(r, ringAt(ignRing, IGN_LOG_CAPACITY, IGN_RECORD_BYTES, i))) {
+            continue;
+        }
+        m += stampOf(r.epoch);
+        m += "  " + String(r.seconds) + " s";
+        m += "  " + String(r.voltBeforeDv / 10.0, 1) + "->" +
+                    String(r.voltMinDv / 10.0, 1) + " V";
+        m += "  " + String(r.ambientC) + " C";
+        if(r.outcome != IGN_OUTCOME_LIT) m += "  failed";
+        else if(r.attempts > 1)          m += "  " + String(r.attempts) + " tries";
+        m += "\n";
+    }
+
+    IgnSummary recent = ignSummarise(ignRing, IGN_RECENT_SAMPLES);
+    if(recent.samples) {
+        m += "\nMedian of " + String(recent.samples) + ":  " +
+             String(recent.medianSeconds) + " s / " +
+             String(recent.medianDropDv / 10.0, 1) + " V";
+    }
+
+    if(counters.baseIgnSamples >= IGN_BASELINE_SAMPLES) {
+        m += "\nBaseline:     " + String(counters.baseIgnSeconds) + " s / " +
+             String(counters.baseIgnDropDv / 10.0, 1) + " V";
+        if(ignDegraded(recent, counters.baseIgnSeconds, counters.baseIgnDropDv)) {
+            m += "  ⚠️ worse";
+        }
+    } else {
+        m += "\nBaseline:     building, " + String(counters.baseIgnSamples) +
+             " of " + String(IGN_BASELINE_SAMPLES) + " starts since the service";
+    }
+    return m;
+}
+
+// What has been worn out so far. The number of starts is the figure that
+// matters for the glow plug -- it is worn by ignitions, not by hours.
+String statsText() {
+    String m = "📊 All time\n";
+    m += "Running:  " + hoursText(counters.burnSec) + "\n";
+    m += "Fuel:     ~" + mlText(counters.fuelMl) + "\n";
+    m += "Starts:   " + String(counters.starts);
+    if(counters.starts) {
+        uint16_t rate = countersFailureRateTenths(counters);
+        m += "  (" + String(counters.startsFailed) + " failed, " +
+             String(rate / 10) + "." + String(rate % 10) + "%)";
+    }
+    m += "\n";
+
+    if(counters.svcEpoch || counters.svcBurnSec) {
+        m += "\nSince service " + dateOf(counters.svcEpoch) + "\n";
+    } else {
+        m += "\nNever serviced\n";
+    }
+    m += "Running:  " + hoursText(countersServiceBurnSec(counters)) + "\n";
+    m += "Fuel:     ~" + mlText(countersServiceFuelMl(counters)) + "\n";
+    m += "Starts:   " + String(countersServiceStarts(counters)) + "\n";
+
+    if(serviceHours) {
+        uint32_t due   = (uint32_t)serviceHours * 3600UL;
+        uint32_t doneS = countersServiceBurnSec(counters);
+        m += doneS >= due
+            ? "\n🔧 Service is due"
+            : "\nNext service in " + hoursText(due - doneS);
+    }
+
+    return m;
+}
+
+void loadCounters() {
+    uint8_t blob[COUNTERS_BLOB_BYTES];
+    size_t  len = prefs.getBytes("counters", blob, sizeof(blob));
+    if(!countersUnpack(counters, blob, len)) countersReset(counters);
+    bootDirtyPending = counters.wasBurning;
+    countersFlushMs  = millis();
+}
+
+void persistStats() {
+    if(!countersDirty) return;
+    uint8_t blob[COUNTERS_BLOB_BYTES];
+    size_t  n = countersPack(counters, blob, sizeof(blob));
+    if(n) prefs.putBytes("counters", blob, n);
+    countersDirty   = false;
+    countersFlushMs = millis();
+}
+
+void updateStats() {
+    static uint8_t lastState = STATE_OFF;
+
+    bool burning = heaterStatus.state != STATE_OFF;
+    bool fresh   = heaterStatus.lastUpdate != 0 &&
+                   (millis() - heaterStatus.lastUpdate) < HEATER_DATA_FRESH_MS;
+
+    // Decide what last night's flag meant, but only once the heater has been
+    // heard from -- before that its state is a guess, not a reading.
+    if(bootDirtyPending && heaterStatus.lastUpdate != 0) {
+        bootDirtyPending = false;
+        if(!burning) {
+            notifyTelegram("⚠️ Last session ended with the heater still lit — "
+                           "the power went before the purge could finish");
+        }
+        counters.wasBurning = burning;
+        countersDirty       = true;
+    }
+
+    if(burning && fresh) {
+        counters.burnSec++;
+        countersDirty = true;
+
+        // burnSec only ever rises, and by one at a time, so the threshold is
+        // crossed exactly once per service. That is the whole latch: no flag
+        // to persist, and no reminder repeated every morning after the
+        // overnight power cut.
+        if(serviceHours) {
+            uint32_t due  = (uint32_t)serviceHours * 3600UL;
+            uint32_t sinceSvc = countersServiceBurnSec(counters);
+            if(sinceSvc == due) {
+                notifyTelegram("🔧 " + String(serviceHours) + " h of running since "
+                               "the last service — time to look at the burner. "
+                               "Reset the count with /service done");
+            }
+        }
+    }
+
+    // updateFuel() resets its accumulator at the start of each burn, so a
+    // reading below what has been billed means a new burn, not a rollback.
+    if(fuelTicks < fuelTicksBilled) fuelTicksBilled = 0;
+    uint32_t ml = fuelMlFromTicks(fuelTicks - fuelTicksBilled);
+    if(ml) {
+        counters.fuelMl += ml;
+        fuelTicksBilled += ml * FUEL_TICKS_PER_ML;
+        countersDirty    = true;
+    }
+
+    if(burning != (lastState != STATE_OFF)) {
+        counters.wasBurning = burning;
+        countersDirty       = true;
+        // The end of a burn is the moment worth committing: the next thing to
+        // happen may well be the power going out.
+        if(!burning) persistStats();
+    }
+    lastState = heaterStatus.state;
+
+    if(burning && millis() - countersFlushMs >= STATS_FLUSH_MS) persistStats();
+}
+
 // Sends progress while the heater burns, and turns the same message into a
 // warning when the garage is not actually warming up.
 void updateProgressReport() {
@@ -1328,6 +1717,8 @@ void updateIgnition() {
 
         case IGN_FAILED:
             ignWatching = false;
+            counters.startsFailed++;
+            countersDirty = true;
             notifyTelegram("🔴 Heater failed to start — no acknowledgement "
                            "after " + String(ignAttempts) + " attempts");
             break;
@@ -1668,6 +2059,9 @@ void updateScheduler() {
             if(heaterEnsureOff()) {
                 shutdownRequested = true;
                 shutdownAtMs      = millis();
+                // Before a blackout shutdown this is the last chance to write
+                // anything down -- the purge may outlast the mains.
+                persistStats();
                 notifyTelegram(d.reason == REASON_BLACKOUT
                     ? "⏱ Shutting down ahead of the mains cut"
                     : "⏱ Runtime limit reached, shutting down");
@@ -2128,6 +2522,7 @@ void handleAPI_Timers() {
     voltClearDeciV      = formNumber("voltClear", voltClearDeciV, 80, 170);
     voltDebounceS       = formNumber("voltDeb", voltDebounceS, 1, 600);
     reportFirstMin      = formNumber("reportFirst", reportFirstMin, 0, 600);
+    serviceHours        = formNumber("serviceHrs", serviceHours, 0, 2000);
     reportRptMin        = formNumber("reportRpt", reportRptMin, 0, 600);
 
     prefs.putString("ntpServer", ntpServer);
@@ -2142,6 +2537,7 @@ void handleAPI_Timers() {
     prefs.putUShort("voltClearDv", voltClearDeciV);
     prefs.putUShort("voltDebSec", voltDebounceS);
     prefs.putUShort("reportFirst", reportFirstMin);
+    prefs.putUShort("serviceHrs", serviceHours);
     prefs.putUShort("reportRpt", reportRptMin);
 
     setupTime();   // pick up a changed server or offset immediately
@@ -2180,6 +2576,7 @@ void handleAPI_TimerStatus() {
     json += "\"lead\":" + String(shutdownLeadMin) + ",";
     json += "\"cooldown\":" + String(cooldownExpectedMin) + ",";
     json += "\"fuelDose\":" + String(fuelDoseUl) + ",";
+    json += "\"serviceHrs\":" + String(serviceHours) + ",";
     json += "\"voltAlarm\":" + String(voltAlarmDeciV) + ",";
     json += "\"voltClear\":" + String(voltClearDeciV) + ",";
     json += "\"voltDeb\":" + String(voltDebounceS) + ",";
@@ -2232,15 +2629,20 @@ void handleAPI_Config() {
 
 // The ring buffer was filled but never read anywhere. Newest entry first.
 void handleAPI_Errors() {
-    int count = errorHistoryIndex < 10 ? errorHistoryIndex : 10;
+    uint8_t count = ringCount(errRing);
     String json = "[";
     json.reserve(512);
-    for(int i = 0; i < count; i++) {
-        int idx = (errorHistoryIndex - 1 - i) % 10;
+    for(uint8_t i = 0; i < count; i++) {
+        ErrorRecord r;
+        if(!errUnpack(r, ringAt(errRing, ERR_LOG_CAPACITY, ERR_RECORD_BYTES, i))) {
+            continue;
+        }
         if(i) json += ",";
-        json += "{\"code\":" + String(errorHistory[idx].errorCode) +
-                ",\"name\":\"" + String(getErrorName(errorHistory[idx].errorCode)) + "\"" +
-                ",\"agoSec\":" + String((millis() - errorHistory[idx].timestamp) / 1000) + "}";
+        // An absolute stamp rather than an age: these outlive reboots now, and
+        // "40 minutes ago" would mean 40 minutes since the last power-up.
+        json += "{\"code\":" + String(r.code) +
+                ",\"name\":\"" + jsonEscape(String(getErrorName(r.code))) + "\"" +
+                ",\"when\":\"" + jsonEscape(stampOf(r.epoch)) + "\"}";
     }
     json += "]";
     server.send(200, "application/json", json);
@@ -2314,6 +2716,16 @@ void handleAPI_TelegramTest() {
     server.send(200, "text/plain", "Test message sent");
 }
 
+// Resetting the service counters is the one action here that destroys a
+// record, so it is POST behind the CSRF header like every other mutation.
+void handleAPI_Service() {
+    if(!csrfOk()) return;
+    countersMarkService(counters, timeValid ? (uint32_t)time(nullptr) : 0);
+    countersDirty = true;
+    persistStats();
+    server.send(200, "text/plain", "Service recorded");
+}
+
 void handleAPI_Info() {
     String json = "{";
     json.reserve(320);
@@ -2327,7 +2739,9 @@ void handleAPI_Info() {
     json += "\"minFreeHeap\":" + String(ESP.getMinFreeHeap()) + ",";
     json += "\"loopMaxMs\":" + String(loopMaxMs) + ",";
     json += "\"time\":\"" + String(timeValid ? currentTimeString() : "not synced") + "\",";
-    json += "\"version\":\"" + version + "\"";
+    json += "\"version\":\"" + version + "\",";
+    json += "\"stats\":\"" + jsonEscape(statsText()) + "\",";
+    json += "\"ign\":\"" + jsonEscape(ignText()) + "\"";
     json += "}";
     server.send(200, "application/json", json);
 }
@@ -2413,6 +2827,11 @@ void setup() {
     voltDebounceS       = prefs.getUShort("voltDebSec", VOLT_DEBOUNCE_SEC_DEFAULT);
     reportFirstMin      = prefs.getUShort("reportFirst", 30);
     reportRptMin        = prefs.getUShort("reportRpt", 0);
+    serviceHours        = prefs.getUShort("serviceHrs", 0);
+    // Lifetime counters, and the flag saying how last night ended
+    loadCounters();
+    loadIgnLog();
+    loadErrLog();
     // Telegram
     tgEnabled = prefs.getBool("tgEnabled", false);
     tgToken   = prefs.getString("tgToken", "");
@@ -2487,6 +2906,7 @@ void setup() {
     server.on("/api/unpair",       handleAPI_Unpair);
     server.on("/api/config",       handleAPI_Config);
     server.on("/api/errors",       handleAPI_Errors);
+    server.on("/api/service",      HTTP_POST, handleAPI_Service);
     server.on("/api/wifi",         handleAPI_WiFi);
     server.on("/api/mqtt",         handleAPI_MQTT);
     server.on("/api/factory",      handleAPI_Factory);
@@ -2567,8 +2987,10 @@ void loop() {
         lastSlowTick = millis();
         updateTelegramPollRate();
         updateFuel();
+        updateStats();
         updateProgressReport();
         updateIgnition();
+        updateIgnitionLog();
         updateLevel();
         updateScheduledStart();
         updateNotifications();

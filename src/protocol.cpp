@@ -32,8 +32,7 @@ uint32_t fuelTickPerSecond(uint16_t doseUl, uint16_t pumpFreqTenths) {
 }
 
 uint32_t fuelMlFromTicks(uint32_t ticks) {
-    // Ticks are 0.1 ul; 10 000 of them make a millilitre.
-    return ticks / 10000UL;
+    return ticks / FUEL_TICKS_PER_ML;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

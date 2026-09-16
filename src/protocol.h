@@ -87,7 +87,12 @@ int rssiFromRaw(uint8_t raw);
 // One second's worth of accumulator ticks at the given pump rate.
 uint32_t fuelTickPerSecond(uint16_t doseUl, uint16_t pumpFreqTenths);
 
-// Accumulated ticks converted to millilitres.
+// Ticks are 0.1 ul, so this many of them make a millilitre. Exposed because
+// billing whole millilitres to a running total has to carry the remainder:
+// rounding it away every second would lose most of the fuel.
+#define FUEL_TICKS_PER_ML 10000UL
+
+// Accumulated ticks converted to millilitres, rounded down.
 uint32_t fuelMlFromTicks(uint32_t ticks);
 
 // ═══════════════════════════════════════════════════════════════════════════

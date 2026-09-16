@@ -611,8 +611,6 @@
                 </div>
                 <input type="number" id="tmCooldown" min="1" max="60"
                        placeholder="Expected purge duration, minutes">
-                <input type="number" id="tmFuelDose" min="5" max="60"
-                       placeholder="Pump dose, microlitres per stroke (22 = typical)">
                 <div class="info">
                     Cutting power to a running heater skips the purge cycle, which
                     cokes up the burner over time. The controller stops it early so
@@ -620,6 +618,17 @@
                     runtime limit applies.
                 </div>
 
+                <h2 style="font-size:1rem; margin-top:16px;">Fuel and wear</h2>
+                <input type="number" id="tmFuelDose" min="5" max="60"
+                       placeholder="Pump dose, microlitres per stroke (22 = typical)">
+                <input type="number" id="tmServiceHrs" min="0" max="2000"
+                       placeholder="Hours of running between services, 0 = no reminder">
+                <div class="info">
+                    The dose sets how consumption is worked out: litres per hour is
+                    dose times pump frequency. Hours since the last service are
+                    counted regardless; the figure above only decides when to say
+                    something about them.
+                </div>
                 <h2 style="font-size:1rem; margin-top:16px;">Progress reports</h2>
                 <div class="form-row">
                     <input type="number" id="tmRepFirst" min="0" max="600"
@@ -751,6 +760,15 @@
                         <div class="status-value" style="font-size:1rem;" id="loopMax">--</div>
                     </div>
                 </div>
+                <h2 style="font-size:1rem; margin-top:16px;">Wear and tear</h2>
+                <div class="info" id="statsBox" style="white-space:pre-line">no data yet</div>
+                <div class="form-row" style="margin-top:8px;">
+                    <button onclick="serviceDone()">🔧 SERVICE DONE</button>
+                </div>
+
+                <h2 style="font-size:1rem; margin-top:16px;">Starts</h2>
+                <div class="info" id="ignBox" style="white-space:pre-line">no data yet</div>
+
                 <h2 style="font-size:1rem; margin-top:16px;">Recent errors</h2>
                 <div class="info" id="errorHistory">none recorded</div>
 
@@ -824,13 +842,8 @@
             .then(list => {
                 const box = document.getElementById('errorHistory');
                 if(!list.length) { box.textContent = 'none recorded'; return; }
-                box.innerHTML = list.map(e => {
-                    const m = Math.floor(e.agoSec / 60);
-                    const ago = m > 59 ? Math.floor(m / 60) + ' h ago'
-                              : m > 0  ? m + ' min ago'
-                                       : e.agoSec + ' s ago';
-                    return `<div>${e.name} — ${ago}</div>`;
-                }).join('');
+                box.innerHTML = list.map(e =>
+                    `<div>${e.name} — ${e.when}</div>`).join('');
             })
             .catch(() => {});
     }
@@ -894,6 +907,7 @@
                 document.getElementById('tmLead').value        = d.lead;
                 document.getElementById('tmCooldown').value    = d.cooldown;
                 document.getElementById('tmFuelDose').value    = d.fuelDose;
+                document.getElementById('tmServiceHrs').value  = d.serviceHrs;
                 document.getElementById('tmVoltAlarm').value   = d.voltAlarm;
                 document.getElementById('tmVoltClear').value   = d.voltClear;
                 document.getElementById('tmVoltDeb').value     = d.voltDeb;
@@ -933,6 +947,7 @@
             lead:       document.getElementById('tmLead').value,
             cooldown:   document.getElementById('tmCooldown').value,
             fuelDose:   document.getElementById('tmFuelDose').value,
+            serviceHrs: document.getElementById('tmServiceHrs').value,
             voltAlarm:  document.getElementById('tmVoltAlarm').value,
             voltClear:  document.getElementById('tmVoltClear').value,
             voltDeb:    document.getElementById('tmVoltDeb').value,
@@ -971,6 +986,12 @@
             if(msg && msg !== 'OK') alert(msg);
             updateStatus();
         });
+    }
+
+    // Wipes the only record of when the burner was last cleaned, so it asks.
+    function serviceDone() {
+        if(!confirm('Record a service now? The counters since the last one start again.')) return;
+        post('/api/service').then(msg => { alert(msg); updateStatus(); });
     }
 
     // ── PAIRING ───────────────────────────────────────────────────
@@ -1159,6 +1180,8 @@
                     Math.round(data.minFreeHeap / 1024) + ' KB';
                 document.getElementById('loopMax').textContent = data.loopMaxMs + ' ms';
                 document.getElementById('fwVersion').textContent     = data.version;
+                document.getElementById('statsBox').textContent      = data.stats;
+                document.getElementById('ignBox').textContent        = data.ign;
                 // Keep the header pill live, but DON'T touch the OTA toggle here.
                 setOtaPill(data.ota === 'Enabled');
             })
