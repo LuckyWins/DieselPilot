@@ -122,3 +122,34 @@ bool startCollidesWithShutdown(int startMinutes, int blackoutMinutes,
     deadline %= MINUTES_PER_DAY;
     return inDayWindow(startMinutes, deadline, blackoutMinutes);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MANUAL START
+// ═══════════════════════════════════════════════════════════════════════════
+
+StartVerdict checkManualStart(const ManualStartInput& in) {
+    if(!in.heaterPaired) return START_NO_HEATER;
+
+    // The protocol offers a bare power toggle, so a command sent while the
+    // heater is running -- or still purging -- would stop it rather than
+    // start it. Only a full stop can be started from.
+    if(in.heaterState != STATE_OFF) return START_BUSY;
+
+    // The deadline is skipped everywhere else without a synced clock, and it
+    // is skipped here for the same reason: refusing on a 1970 timestamp would
+    // leave the heater uncontrollable on exactly the mornings when mains
+    // power comes back before the modem does.
+    if(in.blackoutEnabled && in.timeValid && in.nowMinutes >= 0 &&
+       startCollidesWithShutdown(in.nowMinutes, in.blackoutMinutes,
+                                 (int)in.shutdownLeadMin)) {
+        return START_TOO_LATE;
+    }
+
+    return START_ALLOWED;
+}
+
+int minutesUntil(int now, int target) {
+    int d = target - now;
+    while(d < 0) d += MINUTES_PER_DAY;
+    return d % MINUTES_PER_DAY;
+}

@@ -382,6 +382,100 @@ void test_start_collision_when_the_window_wraps_midnight(void) {
     TEST_ASSERT_FALSE(startCollidesWithShutdown(23 * 60 + 40, 30, 45));
 }
 
+// ── Manual start ──────────────────────────────────────────────────────────
+//
+// The chat and the web GUI both come through checkManualStart(). Before it
+// existed the GUI sent a bare toggle: it could light the heater ten minutes
+// before the mains went, which is exactly the abuse the whole module is here
+// to prevent.
+
+// Heater off, clock synced, 10:00, mains cut at 22:00 with a 15 min lead.
+static ManualStartInput baseManualStart(void) {
+    ManualStartInput in;
+    in.heaterPaired    = true;
+    in.heaterState     = STATE_OFF;
+    in.timeValid       = true;
+    in.nowMinutes      = 10 * 60;
+    in.blackoutEnabled = true;
+    in.blackoutMinutes = 22 * 60;
+    in.shutdownLeadMin = 15;
+    return in;
+}
+
+void test_manual_start_allowed_mid_day(void) {
+    TEST_ASSERT_EQUAL(START_ALLOWED, checkManualStart(baseManualStart()));
+}
+
+void test_manual_start_needs_a_paired_heater(void) {
+    ManualStartInput in = baseManualStart();
+    in.heaterPaired = false;
+    TEST_ASSERT_EQUAL(START_NO_HEATER, checkManualStart(in));
+}
+
+// The command is a toggle, so sending it to a running heater stops it.
+void test_manual_start_refused_while_running(void) {
+    ManualStartInput in = baseManualStart();
+    in.heaterState = STATE_RUNNING;
+    TEST_ASSERT_EQUAL(START_BUSY, checkManualStart(in));
+}
+
+// Mid-purge the toggle is simply lost, and restarting now would abort a purge
+// that has to finish.
+void test_manual_start_refused_while_purging(void) {
+    ManualStartInput in = baseManualStart();
+    in.heaterState = STATE_COOLING;
+    TEST_ASSERT_EQUAL(START_BUSY, checkManualStart(in));
+}
+
+// The case this was written for: 21:50 against a 22:00 cut.
+void test_manual_start_refused_inside_the_window(void) {
+    ManualStartInput in = baseManualStart();
+    in.nowMinutes = 21 * 60 + 50;
+    TEST_ASSERT_EQUAL(START_TOO_LATE, checkManualStart(in));
+}
+
+void test_manual_start_allowed_a_minute_before_the_window(void) {
+    ManualStartInput in = baseManualStart();
+    in.nowMinutes = 21 * 60 + 44;
+    TEST_ASSERT_EQUAL(START_ALLOWED, checkManualStart(in));
+}
+
+void test_manual_start_window_wraps_past_midnight(void) {
+    ManualStartInput in = baseManualStart();
+    in.blackoutMinutes = 30;        // 00:30
+    in.shutdownLeadMin = 45;        // window opens at 23:45
+    in.nowMinutes      = 23 * 60 + 50;
+    TEST_ASSERT_EQUAL(START_TOO_LATE, checkManualStart(in));
+    in.nowMinutes = 10;             // 00:10, still inside
+    TEST_ASSERT_EQUAL(START_TOO_LATE, checkManualStart(in));
+    in.nowMinutes = 23 * 60 + 40;   // just before it opens
+    TEST_ASSERT_EQUAL(START_ALLOWED, checkManualStart(in));
+}
+
+void test_manual_start_ignores_the_window_when_blackout_is_off(void) {
+    ManualStartInput in = baseManualStart();
+    in.blackoutEnabled = false;
+    in.nowMinutes      = 21 * 60 + 50;
+    TEST_ASSERT_EQUAL(START_ALLOWED, checkManualStart(in));
+}
+
+// The realistic morning: mains power is back before the modem is, so the
+// clock is still at 1970. Refusing on that would leave the heater
+// uncontrollable precisely when somebody wants it on.
+void test_manual_start_ignores_the_window_without_a_synced_clock(void) {
+    ManualStartInput in = baseManualStart();
+    in.timeValid  = false;
+    in.nowMinutes = -1;
+    TEST_ASSERT_EQUAL(START_ALLOWED, checkManualStart(in));
+}
+
+void test_minutes_until_counts_forward_around_the_clock(void) {
+    TEST_ASSERT_EQUAL(10,   minutesUntil(21 * 60 + 50, 22 * 60));
+    TEST_ASSERT_EQUAL(0,    minutesUntil(22 * 60,      22 * 60));
+    TEST_ASSERT_EQUAL(40,   minutesUntil(23 * 60 + 50, 30));        // past midnight
+    TEST_ASSERT_EQUAL(1439, minutesUntil(1,            0));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -426,6 +520,17 @@ int main(int, char**) {
     RUN_TEST(test_start_needs_a_paired_heater);
     RUN_TEST(test_start_collision_with_the_shutdown_window);
     RUN_TEST(test_start_collision_when_the_window_wraps_midnight);
+
+    RUN_TEST(test_manual_start_allowed_mid_day);
+    RUN_TEST(test_manual_start_needs_a_paired_heater);
+    RUN_TEST(test_manual_start_refused_while_running);
+    RUN_TEST(test_manual_start_refused_while_purging);
+    RUN_TEST(test_manual_start_refused_inside_the_window);
+    RUN_TEST(test_manual_start_allowed_a_minute_before_the_window);
+    RUN_TEST(test_manual_start_window_wraps_past_midnight);
+    RUN_TEST(test_manual_start_ignores_the_window_when_blackout_is_off);
+    RUN_TEST(test_manual_start_ignores_the_window_without_a_synced_clock);
+    RUN_TEST(test_minutes_until_counts_forward_around_the_clock);
 
     RUN_TEST(test_day_window_basics);
 

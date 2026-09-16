@@ -162,3 +162,37 @@ StartAction decideStart(const StartInput& in);
 // refusal is immediate and explained rather than surprising later.
 bool startCollidesWithShutdown(int startMinutes, int blackoutMinutes,
                                int shutdownLeadMin);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MANUAL START
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Both control paths -- the chat and the web GUI -- have to answer the same
+// question before lighting the heater, and they have to answer it the same
+// way. Scheduling already refuses a start inside the window before the mains
+// cut; a start commanded by hand went through unchecked, only to be stopped
+// by decideShutdown() within the minute. Igniting and purging straight away
+// is the one thing this scheduler exists to prevent.
+
+enum StartVerdict {
+    START_ALLOWED = 0,
+    START_NO_HEATER,     // nothing paired to command
+    START_BUSY,          // already running, or still purging
+    START_TOO_LATE,      // inside the window before the mains cut
+};
+
+struct ManualStartInput {
+    bool     heaterPaired;
+    uint8_t  heaterState;
+    bool     timeValid;
+    int      nowMinutes;          // minutes since local midnight, -1 if unknown
+    bool     blackoutEnabled;
+    int      blackoutMinutes;
+    uint16_t shutdownLeadMin;
+};
+
+StartVerdict checkManualStart(const ManualStartInput& in);
+
+// Minutes from `now` to `target` on a 24-hour circle, so a refusal can say how
+// long is left instead of only saying no.
+int minutesUntil(int now, int target);

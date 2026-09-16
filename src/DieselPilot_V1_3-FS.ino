@@ -762,16 +762,51 @@ bool heaterEnsureOff() {
     return true;
 }
 
-bool heaterEnsureOn() {
-    if(!heaterPaired) return false;
-    // Only from a full stop. Toggling mid-purge does not restart the heater
-    // on these units, and the command would simply be lost.
-    if(heaterStatus.state != STATE_OFF) return false;
+// Defined with the rest of the wall-clock helpers, further down.
+int currentMinutesOfDay();
+
+// Gathers the state the verdict is made from. Every start goes through here,
+// whether it came from the chat, the web GUI or the schedule, so all three
+// refuse on the same grounds.
+StartVerdict heaterStartVerdict() {
+    ManualStartInput in;
+    in.heaterPaired    = heaterPaired;
+    in.heaterState     = heaterStatus.state;
+    in.timeValid       = timeValid;
+    in.nowMinutes      = timeValid ? currentMinutesOfDay() : -1;
+    in.blackoutEnabled = blackoutEnabled;
+    in.blackoutMinutes = blackoutMinutes;
+    in.shutdownLeadMin = shutdownLeadMin;
+    return checkManualStart(in);
+}
+
+// A refusal is only useful if it says what to do about it, so the blackout
+// case carries the number of minutes left rather than a bare no.
+String startRefusalText(StartVerdict v) {
+    switch(v) {
+        case START_NO_HEATER:
+            return "Heater is not paired.";
+        case START_BUSY:
+            return "Heater is already running or still purging";
+        case START_TOO_LATE: {
+            int left = minutesUntil(currentMinutesOfDay(), blackoutMinutes);
+            return "Too late to start: mains power goes in " + String(left) +
+                   " min. Lighting now would mean a shutdown before the burner "
+                   "even settles, which is what cokes it up.";
+        }
+        default:
+            return "";
+    }
+}
+
+StartVerdict heaterEnsureOn() {
+    StartVerdict v = heaterStartVerdict();
+    if(v != START_ALLOWED) return v;
     sendCommand(CMD_POWER);
     ignWatching      = true;
     ignAttempts      = 1;
     ignCommandedAtMs = millis();
-    return true;
+    return START_ALLOWED;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1101,9 +1136,10 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
     }
 
     if(cmd == "on" || cmd == "/on") {
-        tgBot.sendTo(chatId, heaterEnsureOn()
+        StartVerdict v = heaterEnsureOn();
+        tgBot.sendTo(chatId, v == START_ALLOWED
             ? "🔥 Ignition requested"
-            : "Heater is already running or still purging");
+            : startRefusalText(v));
     } else if(cmd == "off" || cmd == "/off") {
         tgBot.sendTo(chatId, heaterEnsureOff()
             ? "❄️ Shutdown requested, the purge will follow"
@@ -1367,14 +1403,14 @@ void updateScheduledStart() {
     in.graceMin     = START_GRACE_MIN;
 
     switch(decideStart(in)) {
-        case START_FIRE:
+        case START_FIRE: {
             cancelScheduledStart();
-            if(heaterEnsureOn()) {
-                notifyTelegram("⏰ Scheduled start — igniting");
-            } else {
-                notifyTelegram("⚠️ Scheduled start could not be sent");
-            }
+            StartVerdict v = heaterEnsureOn();
+            notifyTelegram(v == START_ALLOWED
+                ? "⏰ Scheduled start — igniting"
+                : "⚠️ Scheduled start refused: " + startRefusalText(v));
             break;
+        }
 
         case START_MISSED:
             cancelScheduledStart();
@@ -1730,13 +1766,49 @@ void handleAPI_OTAConfig() {
     delay(1000); ESP.restart();
 }
 
+// The GUI used to send a bare CMD_POWER from here, bypassing the wrappers the
+// chat goes through: no on/off distinction, no ignition watch, and no idea
+// that the mains were about to be cut. Both paths now answer the same rules,
+// and a refusal comes back as text the GUI can show.
 void handleAPI_Command() {
     if(!csrfOk()) return;
     String cmd = server.arg("c");
-    if(cmd == "power")      sendCommand(CMD_POWER);
-    else if(cmd == "up")    sendCommand(CMD_UP);
+
+    // "power" is kept for anything still sending the old toggle. It resolves
+    // to an explicit start or stop from the reported state.
+    if(cmd == "power") {
+        cmd = heaterIsOffOrStopping(heaterStatus.state) ? "on" : "off";
+    }
+
+    if(cmd == "on") {
+        StartVerdict v = heaterEnsureOn();
+        if(v != START_ALLOWED) {
+            server.send(409, "text/plain", startRefusalText(v));
+            return;
+        }
+        server.send(200, "text/plain", "Ignition requested");
+        return;
+    }
+
+    if(cmd == "off") {
+        server.send(200, "text/plain", heaterEnsureOff()
+            ? "Shutdown requested, the purge will follow"
+            : "Heater is already off or stopping");
+        return;
+    }
+
+    if(!heaterPaired) {
+        server.send(409, "text/plain", "Heater is not paired.");
+        return;
+    }
+
+    if(cmd == "up")         sendCommand(CMD_UP);
     else if(cmd == "down")  sendCommand(CMD_DOWN);
     else if(cmd == "mode")  sendCommand(CMD_MODE);
+    else {
+        server.send(400, "text/plain", "Unknown command");
+        return;
+    }
     server.send(200, "text/plain", "OK");
 }
 

@@ -430,7 +430,8 @@
     <div class="glass-card">
         <h2>🎮 Control</h2>
         <div class="controls">
-            <button onclick="sendCmd('power')">⚡ POWER</button>
+            <button onclick="sendCmd('on')">🔥 ON</button>
+            <button onclick="sendCmd('off')">❄️ OFF</button>
             <button onclick="sendCmd('up')">▲ UP</button>
             <button onclick="sendCmd('down')">▼ DOWN</button>
             <button onclick="sendCmd('mode')">🔄 MODE</button>
@@ -964,7 +965,12 @@
 
     // ── HEATER COMMANDS ───────────────────────────────────────────
     function sendCmd(cmd) {
-        post(`/api/cmd?c=${cmd}`).then(() => updateStatus());
+        // A start can be refused -- mid-purge, or too close to the mains cut.
+        // Swallowing that reply would leave the button looking like it worked.
+        post(`/api/cmd?c=${cmd}`).then(msg => {
+            if(msg && msg !== 'OK') alert(msg);
+            updateStatus();
+        });
     }
 
     // ── PAIRING ───────────────────────────────────────────────────
