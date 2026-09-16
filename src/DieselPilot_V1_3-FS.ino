@@ -1512,8 +1512,17 @@ void updateTelegramCommands() {
 void updateTelegramPollRate() {
     if(!tgEnabled || !tgReady) return;
 
-    uint32_t want = (lastTgActivityMs != 0 &&
-                     millis() - lastTgActivityMs < TG_POLL_BOOST_MS)
+    // Chat id discovery is the one moment a fast reply actually matters, and
+    // it used to be the slowest: the boost below only triggers on a message
+    // from an allowed chat, and during discovery there is no allowed chat yet
+    // by definition. So a minute would pass before /id came back, which reads
+    // as a bot that is simply not working.
+    bool discovering = tgDiscoverUntilMs != 0 &&
+                       (int32_t)(tgDiscoverUntilMs - millis()) > 0;
+
+    uint32_t want = (discovering ||
+                     (lastTgActivityMs != 0 &&
+                      millis() - lastTgActivityMs < TG_POLL_BOOST_MS))
                   ? TG_POLL_ACTIVE_MS
                   : (uint32_t)tgPollSec * 1000UL;
 
