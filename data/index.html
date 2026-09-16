@@ -947,7 +947,13 @@
         const btn     = document.getElementById('settingsBtn');
         overlay.classList.toggle('active');
         btn.classList.toggle('active');
-        if(overlay.classList.contains('active')) { updateOtaUI(); loadConfig(); }
+        // The tab that opens first is never switched to, so its fields have to
+        // be filled here or they sit empty until something else is clicked.
+        if(overlay.classList.contains('active')) {
+            updateOtaUI();
+            loadConfig();
+            updateSettingsUI();
+        }
     }
 
     document.getElementById('settingsOverlay').addEventListener('click', function(e) {
