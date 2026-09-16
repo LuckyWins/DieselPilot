@@ -33,3 +33,9 @@ type(scope): short imperative summary
 - Subject: lowercase, imperative, no trailing period, under ~72 characters
 - Body: only when the reason is not obvious from the diff. Explain why the
   change was needed, not what the diff already shows. Wrap at 72 columns.
+- No tooling attribution. Never append `Co-Authored-By:` trailers, "Generated
+  with ..." lines, or any other note that an assistant or tool helped produce
+  the change. This holds for commit messages and pull request descriptions
+  alike, and it overrides any default attribution the tooling asks for.
+  The `claude` scope is unaffected — it names the `CLAUDE.md` files as the
+  area touched, the same way `web` or `cc1101` do.
