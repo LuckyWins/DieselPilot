@@ -132,6 +132,7 @@
             transition: all 0.3s;
         }
         .status-item:hover { border-color: rgba(255, 107, 0, 0.3); transform: translateY(-2px); }
+        .status-value.low { color: #d32f2f; }
         .status-label { font-size: 0.85rem; color: #888; margin-bottom: 6px; }
         .status-value { font-size: 1.5rem; font-weight: 600; color: #ff6b00; }
         
@@ -459,6 +460,14 @@
             <div class="status-item">
                 <div class="status-label">Error</div>
                 <div class="status-value" id="error">--</div>
+            </div>
+            <div class="status-item" id="tankTile" style="display:none;">
+                <div class="status-label">Tank</div>
+                <div class="status-value" id="tankValue">--</div>
+            </div>
+            <div class="status-item" id="fuelTile" style="display:none;">
+                <div class="status-label">Fuel this burn</div>
+                <div class="status-value" id="fuelValue">--</div>
             </div>
         </div>
     </div>
@@ -1332,6 +1341,31 @@
     // The device answering is not the same as the heater being heard. With a
     // dead RF module the tiles keep their last values indefinitely and look
     // perfectly live, so say out loud how old they are.
+    // Millilitres read as litres once there are enough of them, and always
+    // with a tilde: this is worked out from the pump, not measured.
+    function mlText(ml) {
+        return ml < 1000 ? `${ml} ml` : `${(ml / 1000).toFixed(1)} l`;
+    }
+
+    function showFuel(data) {
+        const tank = document.getElementById('tankTile');
+        tank.style.display = data.tankEn ? 'block' : 'none';
+        if(data.tankEn) {
+            const v = document.getElementById('tankValue');
+            v.textContent = '~' + mlText(data.tankLeft);
+            // Same bands the warnings use, so the tile and the chat agree.
+            const pct = data.tankCap ? (data.tankLeft * 100) / data.tankCap : 100;
+            v.classList.toggle('low', pct <= 25);
+        }
+
+        // Only worth a tile while something is being burnt.
+        const fuel = document.getElementById('fuelTile');
+        fuel.style.display = data.fuelMl > 0 ? 'block' : 'none';
+        if(data.fuelMl > 0) {
+            document.getElementById('fuelValue').textContent = '~' + mlText(data.fuelMl);
+        }
+    }
+
     function showHeaterAge(data) {
         const box = document.getElementById('heaterAge');
         const show = (text, alert) => {
@@ -1379,6 +1413,7 @@
                 document.getElementById('rssi').textContent     = data.rssi;
                 document.getElementById('error').textContent    = data.errorName;
                 document.getElementById('currentAddr').textContent = data.addr;
+                showFuel(data);
                 showHeaterAge(data);
                 markFresh();
             })

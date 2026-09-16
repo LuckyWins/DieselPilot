@@ -2778,6 +2778,9 @@ void handleAPI_Status() {
     json += "\"rfFault\":" + String(cc1101Fault ? "true" : "false") + ",";
     json += "\"paired\":" + String(heaterPaired ? "true" : "false") + ",";
     json += "\"fuelMl\":" + String(fuelMlFromTicks(fuelTicks)) + ",";
+    json += "\"tankEn\":" + String(tankActive() ? "true" : "false") + ",";
+    json += "\"tankLeft\":" + String(tankRemainingMl) + ",";
+    json += "\"tankCap\":" + String(tankCapacityMl) + ",";
     json += "\"ageSec\":" + String(heaterStatus.lastUpdate
                 ? (long)((millis() - heaterStatus.lastUpdate) / 1000) : -1L);
     json += "}";
