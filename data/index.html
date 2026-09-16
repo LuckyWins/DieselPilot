@@ -487,7 +487,7 @@
 
         <!-- TABS -->
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('pairing',this)"><span class="ic">🔗</span>Pairing</div>
+            <div class="tab active" onclick="switchTab('heater',this)"><span class="ic">🔥</span>Heater</div>
             <div class="tab" onclick="switchTab('wifi',this)"><span class="ic">📡</span>WiFi</div>
             <div class="tab" onclick="switchTab('mqtt',this)"><span class="ic">📨</span>MQTT</div>
             <div class="tab" onclick="switchTab('telegram',this)"><span class="ic">✈️</span>Telegram</div>
@@ -497,9 +497,9 @@
         </div>
 
         <!-- PAIRING TAB -->
-        <div id="pairing" class="tab-content active">
+        <div id="heater" class="tab-content active">
             <div class="glass-card">
-                <h2>🔗 Pairing</h2>
+                <h2>🔥 Heater</h2>
                 <div class="field">
                     <label class="lbl">Heater protocol</label>
                     <select id="version">
@@ -523,6 +523,40 @@
                 </div>
                 <div class="info"><strong>Current:</strong> <span id="currentAddr">Not paired</span></div>
                 <button class="danger" onclick="unpair()">🔓 FORGET HEATER</button>
+
+                <h2 class="subhead">Fuel and wear</h2>
+                <div class="field">
+                    <label class="lbl">Pump dose, microlitres per stroke</label>
+                    <input type="number" id="tmFuelDose" min="5" max="60"
+                           placeholder="Pump dose, microlitres per stroke (22 = typical)">
+                </div>
+                <div class="field">
+                    <label class="lbl">Service interval, hours — 0 disables</label>
+                    <input type="number" id="tmServiceHrs" min="0" max="2000"
+                           placeholder="Hours of running between services, 0 = no reminder">
+                </div>
+                <div class="info">
+                    The dose sets how consumption is worked out: litres per hour is
+                    dose times pump frequency. Hours since the last service are
+                    counted regardless; the figure above only decides when to say
+                    something about them.
+                </div>
+
+                <div class="toggle-row" style="margin-top:12px;">
+                    <span>Estimate what is left in the tank</span>
+                    <label class="switch">
+                        <input type="checkbox" id="tmTankEn">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="field">
+                    <label class="lbl">Tank capacity, millilitres</label>
+                    <input type="number" id="tmTankCap" min="0" max="200000" step="500"
+                           placeholder="Tank capacity in millilitres">
+                </div>
+                <div class="info" id="tankInfo"></div>
+
+                <button onclick="saveTimers()">💾 SAVE HEATER SETTINGS</button>
             </div>
         </div>
 
@@ -644,6 +678,54 @@
                 </div>
 
                 <button onclick="saveTelegram()">💾 SAVE &amp; REBOOT</button>
+
+                <h2 class="subhead">Progress reports</h2>
+                <div class="form-row">
+                    <div class="field">
+                        <label class="lbl">First report after, minutes</label>
+                        <input type="number" id="tmRepFirst" min="0" max="600"
+                               placeholder="First report after N min (0 = never)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Repeat every, minutes — 0 for once</label>
+                        <input type="number" id="tmRepRpt" min="0" max="600"
+                               placeholder="Repeat every N min (0 = once)">
+                    </div>
+                </div>
+                <div class="info">
+                    &laquo;Heater: RUNNING&raquo; only says the state changed. These
+                    reports say whether the garage is actually warming up — and if
+                    it is not, the same message becomes a warning. Tune the delay:
+                    too early and a cold heat exchanger triggers false alarms.
+                </div>
+
+
+                <h2 class="subhead">Supply voltage</h2>
+                <div class="form-row">
+                    <div class="field">
+                        <label class="lbl">Warn below, tenths of a volt</label>
+                        <input type="number" id="tmVoltAlarm" min="80" max="160"
+                               placeholder="Warn below, tenths of V (120 = 12.0)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">Clear above, tenths of a volt</label>
+                        <input type="number" id="tmVoltClear" min="80" max="170"
+                               placeholder="Clear above (125 = 12.5)">
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="lbl">Hold for, seconds</label>
+                    <input type="number" id="tmVoltDeb" min="1" max="600"
+                           placeholder="Hold for N seconds before reporting (30)">
+                </div>
+                <div class="info">
+                    The glow plug pulls eight to ten amps at ignition, so the rail
+                    dips briefly every start. Only a sag that holds is reported —
+                    it means the PSU is undersized, a common cause of hard starting.
+                </div>
+
+                <button onclick="saveTimers()">💾 SAVE ALERT SETTINGS</button>
+
             </div>
         </div>
 
@@ -710,95 +792,6 @@
                     cokes up the burner over time. The controller stops it early so
                     the fan can finish. Needs a synced clock — without one only the
                     runtime limit applies.
-                </div>
-
-                <h2 class="subhead">Fuel and wear</h2>
-                <div class="field">
-                    <label class="lbl">Pump dose, microlitres per stroke</label>
-                    <input type="number" id="tmFuelDose" min="5" max="60"
-                           placeholder="Pump dose, microlitres per stroke (22 = typical)">
-                </div>
-                <div class="field">
-                    <label class="lbl">Service interval, hours — 0 disables</label>
-                    <input type="number" id="tmServiceHrs" min="0" max="2000"
-                           placeholder="Hours of running between services, 0 = no reminder">
-                </div>
-                <div class="info">
-                    The dose sets how consumption is worked out: litres per hour is
-                    dose times pump frequency. Hours since the last service are
-                    counted regardless; the figure above only decides when to say
-                    something about them.
-                </div>
-
-                <div class="toggle-row" style="margin-top:12px;">
-                    <span>Estimate what is left in the tank</span>
-                    <label class="switch">
-                        <input type="checkbox" id="tmTankEn">
-                        <span class="slider"></span>
-                    </label>
-                </div>
-                <div class="field">
-                    <label class="lbl">Tank capacity, millilitres</label>
-                    <input type="number" id="tmTankCap" min="0" max="200000" step="500"
-                           placeholder="Tank capacity in millilitres">
-                </div>
-                <div class="info" id="tankInfo"></div>
-
-                <h2 class="subhead">Progress reports</h2>
-                <div class="form-row">
-                    <div class="field">
-                        <label class="lbl">First report after, minutes</label>
-                        <input type="number" id="tmRepFirst" min="0" max="600"
-                               placeholder="First report after N min (0 = never)">
-                    </div>
-                    <div class="field">
-                        <label class="lbl">Repeat every, minutes — 0 for once</label>
-                        <input type="number" id="tmRepRpt" min="0" max="600"
-                               placeholder="Repeat every N min (0 = once)">
-                    </div>
-                </div>
-                <div class="info">
-                    &laquo;Heater: RUNNING&raquo; only says the state changed. These
-                    reports say whether the garage is actually warming up — and if
-                    it is not, the same message becomes a warning. Tune the delay:
-                    too early and a cold heat exchanger triggers false alarms.
-                </div>
-
-                <h2 class="subhead">Supply voltage</h2>
-                <div class="form-row">
-                    <div class="field">
-                        <label class="lbl">Warn below, tenths of a volt</label>
-                        <input type="number" id="tmVoltAlarm" min="80" max="160"
-                               placeholder="Warn below, tenths of V (120 = 12.0)">
-                    </div>
-                    <div class="field">
-                        <label class="lbl">Clear above, tenths of a volt</label>
-                        <input type="number" id="tmVoltClear" min="80" max="170"
-                               placeholder="Clear above (125 = 12.5)">
-                    </div>
-                </div>
-                <div class="field">
-                    <label class="lbl">Hold for, seconds</label>
-                    <input type="number" id="tmVoltDeb" min="1" max="600"
-                           placeholder="Hold for N seconds before reporting (30)">
-                </div>
-                <div class="info">
-                    The glow plug pulls eight to ten amps at ignition, so the rail
-                    dips briefly every start. Only a sag that holds is reported —
-                    it means the PSU is undersized, a common cause of hard starting.
-                </div>
-
-                <h2 class="subhead">Clock</h2>
-                <div class="form-row">
-                    <div class="field">
-                        <label class="lbl">NTP server</label>
-                        <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
-                    </div>
-                    <div class="field">
-                        <label class="lbl">UTC offset, minutes</label>
-                        <input type="number" id="tmTz" min="-720" max="840"
-                               placeholder="UTC offset, min (180 = UTC+3)">
-                    </div>
                 </div>
 
                 <button onclick="saveTimers()">💾 SAVE TIMERS</button>
@@ -899,6 +892,21 @@
                         <div class="status-value" style="font-size:1rem;" id="loopMax">--</div>
                     </div>
                 </div>
+                <h2 class="subhead">Clock</h2>
+                <div class="form-row">
+                    <div class="field">
+                        <label class="lbl">NTP server</label>
+                        <input type="text" id="tmNtp" placeholder="NTP server (empty = keep current)">
+                    </div>
+                    <div class="field">
+                        <label class="lbl">UTC offset, minutes</label>
+                        <input type="number" id="tmTz" min="-720" max="840"
+                               placeholder="UTC offset, min (180 = UTC+3)">
+                    </div>
+                </div>
+
+                <button onclick="saveTimers()">💾 SAVE CLOCK</button>
+
                 <h2 class="subhead">Wear and tear</h2>
                 <div class="info" id="statsBox" style="white-space:pre-line">no data yet</div>
                 <div class="form-row" style="margin-top:8px;">
@@ -910,6 +918,7 @@
 
                 <h2 class="subhead">Recent errors</h2>
                 <div class="info" id="errorHistory">none recorded</div>
+
 
                 <div class="form-row" style="margin-top:12px;">
                     <button onclick="rebootDevice()">🔄 REBOOT</button>
@@ -1124,7 +1133,10 @@
         if(tab === 'ota')      updateOtaUI();
         if(tab === 'telegram') updateTelegramUI();
         if(tab === 'system')   loadErrors();
-        if(tab === 'timers') updateTimersUI();
+        // Settings from /api/timers now live in four tabs, and every one of
+        // them needs its fields filled in before it is looked at.
+        if(tab === 'timers' || tab === 'heater' ||
+           tab === 'telegram' || tab === 'system') updateTimersUI();
     }
 
     // ── FORM HELPERS ──────────────────────────────────────────────

@@ -2997,7 +2997,7 @@ void handleAPI_Timers() {
     prefs.putUShort("reportRpt", reportRptMin);
 
     setupTime();   // pick up a changed server or offset immediately
-    server.send(200, "text/plain", "Timers saved!");
+    server.send(200, "text/plain", "Saved!");
 }
 
 void handleAPI_Schedule() {
