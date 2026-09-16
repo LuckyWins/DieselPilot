@@ -556,7 +556,7 @@
                 </div>
                 <div class="info" id="tankInfo"></div>
 
-                <button onclick="saveTimers()">💾 SAVE HEATER SETTINGS</button>
+                <button onclick="saveHeaterCfg()">💾 SAVE HEATER SETTINGS</button>
             </div>
         </div>
 
@@ -724,7 +724,7 @@
                     it means the PSU is undersized, a common cause of hard starting.
                 </div>
 
-                <button onclick="saveTimers()">💾 SAVE ALERT SETTINGS</button>
+                <button onclick="saveAlerts()">💾 SAVE ALERT SETTINGS</button>
 
             </div>
         </div>
@@ -905,7 +905,7 @@
                     </div>
                 </div>
 
-                <button onclick="saveTimers()">💾 SAVE CLOCK</button>
+                <button onclick="saveClock()">💾 SAVE CLOCK</button>
 
                 <h2 class="subhead">Wear and tear</h2>
                 <div class="info" id="statsBox" style="white-space:pre-line">no data yet</div>
@@ -1042,8 +1042,8 @@
     const toHHMM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' +
                         String(m % 60).padStart(2, '0');
 
-    function updateTimersUI() {
-        fetch('/api/timers/status')
+    function updateSettingsUI() {
+        fetch('/api/settings')
             .then(r => r.json())
             .then(d => {
                 document.getElementById('tmNow').textContent   = d.now;
@@ -1090,39 +1090,63 @@
         const at = document.getElementById('schedAt').value;
         if(!at) { alert('Pick a time first'); return; }
         post('/api/schedule?at=' + encodeURIComponent(at))
-            .then(msg => { alert(msg); updateTimersUI(); })
+            .then(msg => { alert(msg); updateSettingsUI(); })
             .catch(() => alert('Device unreachable'));
     }
 
     function cancelSchedule() {
         post('/api/schedule?cancel=1')
-            .then(msg => { alert(msg); updateTimersUI(); })
+            .then(msg => { alert(msg); updateSettingsUI(); })
+            .catch(() => alert('Device unreachable'));
+    }
+
+    // Each of these writes what its own tab shows. They used to be one
+    // function posting everything, which meant a save in any tab reinstated
+    // whatever another tab had open at the time.
+    const val = id => document.getElementById(id).value;
+    const chk = id => document.getElementById(id).checked ? '1' : '0';
+
+    function saveSection(url, fields, after) {
+        post(url + '?' + new URLSearchParams(fields))
+            .then(msg => { alert(msg); if(after) after(); })
             .catch(() => alert('Device unreachable'));
     }
 
     function saveTimers() {
-        const [h, m] = document.getElementById('tmBlackoutAt').value.split(':');
-        const q = new URLSearchParams({
-            autoOff:    document.getElementById('tmAutoOff').value,
-            blackoutEn: document.getElementById('tmBlackoutEn').checked ? '1' : '0',
+        const [h, m] = val('tmBlackoutAt').split(':');
+        saveSection('/api/timers', {
+            autoOff:    val('tmAutoOff'),
+            blackoutEn: chk('tmBlackoutEn'),
             blackout:   (Number(h) * 60 + Number(m)) || 0,
-            lead:       document.getElementById('tmLead').value,
-            cooldown:   document.getElementById('tmCooldown').value,
-            fuelDose:   document.getElementById('tmFuelDose').value,
-            tankEn:     document.getElementById('tmTankEn').checked ? '1' : '0',
-            tankCap:    document.getElementById('tmTankCap').value,
-            serviceHrs: document.getElementById('tmServiceHrs').value,
-            voltAlarm:  document.getElementById('tmVoltAlarm').value,
-            voltClear:  document.getElementById('tmVoltClear').value,
-            voltDeb:    document.getElementById('tmVoltDeb').value,
-            reportFirst: document.getElementById('tmRepFirst').value,
-            reportRpt:  document.getElementById('tmRepRpt').value,
-            ntpServer:  document.getElementById('tmNtp').value,
-            tzOffset:   document.getElementById('tmTz').value
-        });
-        post('/api/timers?' + q)
-            .then(msg => { alert(msg); updateTimersUI(); })
-            .catch(() => alert('Device unreachable'));
+            lead:       val('tmLead'),
+            cooldown:   val('tmCooldown')
+        }, updateSettingsUI);
+    }
+
+    function saveHeaterCfg() {
+        saveSection('/api/heater', {
+            fuelDose:   val('tmFuelDose'),
+            serviceHrs: val('tmServiceHrs'),
+            tankEn:     chk('tmTankEn'),
+            tankCap:    val('tmTankCap')
+        }, updateSettingsUI);
+    }
+
+    function saveAlerts() {
+        saveSection('/api/alerts', {
+            voltAlarm:   val('tmVoltAlarm'),
+            voltClear:   val('tmVoltClear'),
+            voltDeb:     val('tmVoltDeb'),
+            reportFirst: val('tmRepFirst'),
+            reportRpt:   val('tmRepRpt')
+        }, updateSettingsUI);
+    }
+
+    function saveClock() {
+        saveSection('/api/clock', {
+            ntpServer: val('tmNtp'),
+            tzOffset:  val('tmTz')
+        }, updateSettingsUI);
     }
 
     function switchTab(tab, el) {
@@ -1133,10 +1157,10 @@
         if(tab === 'ota')      updateOtaUI();
         if(tab === 'telegram') updateTelegramUI();
         if(tab === 'system')   loadErrors();
-        // Settings from /api/timers now live in four tabs, and every one of
-        // them needs its fields filled in before it is looked at.
+        // These settings live in four tabs and are read in one request, so
+        // every one of those tabs fills its fields from the same place.
         if(tab === 'timers' || tab === 'heater' ||
-           tab === 'telegram' || tab === 'system') updateTimersUI();
+           tab === 'telegram' || tab === 'system') updateSettingsUI();
     }
 
     // ── FORM HELPERS ──────────────────────────────────────────────

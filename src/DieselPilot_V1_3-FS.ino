@@ -132,7 +132,14 @@
 // it loses that race nearly every time.
 // How long a freshly flashed image has to prove it can still be reached
 // before the bootloader is allowed to put the old one back.
-#define OTA_VERIFY_WINDOW_MS 300000UL
+//
+// Two thresholds, because the two channels are not equally trustworthy. The
+// network is ours and its absence is the image's fault. Telegram is somebody
+// else's service reached over a metered link: it was unreachable for ten
+// seconds on the bench and took a perfectly good image down with it, which is
+// a worse failure than the one this guards against.
+#define OTA_VERIFY_BOT_WAIT_MS 180000UL
+#define OTA_VERIFY_WINDOW_MS   300000UL
 
 #define WIFI_AP_RETRY_MS 60000
 
@@ -2482,6 +2489,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 
 // True while this image is on probation.
 static bool     otaPendingVerify   = false;
+static uint32_t otaBotDeadline     = 0;
 static uint32_t otaVerifyDeadline  = 0;
 
 void setupOtaVerify() {
@@ -2492,6 +2500,7 @@ void setupOtaVerify() {
     if(state != ESP_OTA_IMG_PENDING_VERIFY) return;
 
     otaPendingVerify  = true;
+    otaBotDeadline    = millis() + OTA_VERIFY_BOT_WAIT_MS;
     otaVerifyDeadline = millis() + OTA_VERIFY_WINDOW_MS;
     Serial.println("OTA: new image on probation, must prove it is reachable");
 }
@@ -2506,12 +2515,21 @@ void updateOtaVerify() {
 
     bool networkUp = (staSSID.length() == 0) || (WiFi.status() == WL_CONNECTED);
     bool botUp     = !tgEnabled || tgReady;
+    bool botGaveUp = (int32_t)(millis() - otaBotDeadline) >= 0;
 
-    if(networkUp && botUp) {
+    // Both channels answering is the clean case. Failing that, the network
+    // alone is enough once the bot has had its three minutes: an image that
+    // is on the network can be flashed again, which is what recovery needs.
+    if(networkUp && (botUp || botGaveUp)) {
         esp_ota_mark_app_valid_cancel_rollback();
         otaPendingVerify = false;
-        Serial.println("OTA: image confirmed, rollback cancelled");
-        notifyTelegram("✅ New firmware confirmed — it came back and can be reached");
+        Serial.println(botUp
+            ? "OTA: image confirmed, rollback cancelled"
+            : "OTA: image confirmed on the network alone, the bot never answered");
+        notifyTelegram(botUp
+            ? "✅ New firmware confirmed — it came back and can be reached"
+            : "⚠️ New firmware kept, but the bot did not answer within three "
+              "minutes of the update. Worth a look.");
         return;
     }
 
@@ -2519,7 +2537,7 @@ void updateOtaVerify() {
 
     // Reboot without confirming. The bootloader finds an image that never
     // vouched for itself and starts the previous one instead.
-    Serial.println("OTA: image never became reachable — rebooting to roll back");
+    Serial.println("OTA: never reached the network — rebooting to roll back");
     delay(100);
     ESP.restart();
 }
@@ -2949,36 +2967,46 @@ void handleAPI_MQTT() {
     if(mqttEnabled) connectMQTT();
 }
 
+// One endpoint used to take every setting on this page, which meant saving
+// in any tab wrote the values of all the others. Harmless while one person
+// has the page open once, and wrong the moment that stops being true: two
+// browsers open and the later save silently reinstates whatever the earlier
+// one had changed. Each tab now writes what it shows and nothing else.
+//
+// Reading stays in one place: a single fetch fills every tab, and a read
+// cannot clobber anything.
+
 void handleAPI_Timers() {
     if(!csrfOk()) return;
-    ntpServer           = formField("ntpServer", ntpServer);
-    tzOffsetMin         = formNumber("tzOffset", tzOffsetMin, -720, 840);
     autoOffMin          = formNumber("autoOff", autoOffMin, 0, 1440);
     blackoutEnabled     = formFlag("blackoutEn", blackoutEnabled);
     blackoutMinutes     = formNumber("blackout", blackoutMinutes, 0, 1439);
     shutdownLeadMin     = formNumber("lead", shutdownLeadMin, 1, 240);
     cooldownExpectedMin = formNumber("cooldown", cooldownExpectedMin, 1, 60);
-    fuelDoseUl          = formNumber("fuelDose", fuelDoseUl, 5, 60);
-    tankEnabled         = formFlag("tankEn", tankEnabled);
-    tankCapacityMl      = formNumber("tankCap", tankCapacityMl, 0, 200000);
-    serviceHours        = formNumber("serviceHrs", serviceHours, 0, 2000);
-    voltAlarmDeciV      = formNumber("voltAlarm", voltAlarmDeciV, 80, 160);
-    voltClearDeciV      = formNumber("voltClear", voltClearDeciV, 80, 170);
-    voltDebounceS       = formNumber("voltDeb", voltDebounceS, 1, 600);
-    reportFirstMin      = formNumber("reportFirst", reportFirstMin, 0, 600);
-    reportRptMin        = formNumber("reportRpt", reportRptMin, 0, 600);
 
-    prefs.putString("ntpServer", ntpServer);
-    prefs.putInt("tzOffsetMin", tzOffsetMin);
     prefs.putUShort("autoOffMin", autoOffMin);
     prefs.putBool("blackoutEn", blackoutEnabled);
     prefs.putInt("blackoutMin", blackoutMinutes);
     prefs.putUShort("shutdownLead", shutdownLeadMin);
     prefs.putUShort("cooldownMin", cooldownExpectedMin);
+
+    server.send(200, "text/plain", "Timers saved");
+}
+
+// What this particular unit is: the pump it has, the tank it draws from,
+// how often it wants looking at.
+void handleAPI_HeaterCfg() {
+    if(!csrfOk()) return;
+    fuelDoseUl     = formNumber("fuelDose", fuelDoseUl, 5, 60);
+    serviceHours   = formNumber("serviceHrs", serviceHours, 0, 2000);
+    tankEnabled    = formFlag("tankEn", tankEnabled);
+    tankCapacityMl = formNumber("tankCap", tankCapacityMl, 0, 200000);
+
     prefs.putUShort("fuelDoseUl", fuelDoseUl);
+    prefs.putUShort("serviceHrs", serviceHours);
     prefs.putBool("tankEnabled", tankEnabled);
     prefs.putUInt("tankCapMl", tankCapacityMl);
-    prefs.putUShort("serviceHrs", serviceHours);
+
     // A tank that shrank below what it is holding would sit permanently at
     // "full plus a bit", and the warning bands would never fire.
     if(tankRemainingMl > tankCapacityMl) {
@@ -2990,14 +3018,40 @@ void handleAPI_Timers() {
     // for a crossing that happened while nobody was counting.
     tankWarnLast = tankActive()
                  ? tankWarnLevel(tankRemainingMl, tankCapacityMl) : 0;
+
+    server.send(200, "text/plain", "Heater settings saved");
+}
+
+// Thresholds that decide when the bot says something. They do nothing at all
+// without it, which is why they live on its tab.
+void handleAPI_Alerts() {
+    if(!csrfOk()) return;
+    voltAlarmDeciV = formNumber("voltAlarm", voltAlarmDeciV, 80, 160);
+    voltClearDeciV = formNumber("voltClear", voltClearDeciV, 80, 170);
+    voltDebounceS  = formNumber("voltDeb", voltDebounceS, 1, 600);
+    reportFirstMin = formNumber("reportFirst", reportFirstMin, 0, 600);
+    reportRptMin   = formNumber("reportRpt", reportRptMin, 0, 600);
+
     prefs.putUShort("voltAlarmDv", voltAlarmDeciV);
     prefs.putUShort("voltClearDv", voltClearDeciV);
     prefs.putUShort("voltDebSec", voltDebounceS);
     prefs.putUShort("reportFirst", reportFirstMin);
     prefs.putUShort("reportRpt", reportRptMin);
 
+    server.send(200, "text/plain", "Alert settings saved");
+}
+
+// A property of the controller rather than of the heater.
+void handleAPI_Clock() {
+    if(!csrfOk()) return;
+    ntpServer   = formField("ntpServer", ntpServer);
+    tzOffsetMin = formNumber("tzOffset", tzOffsetMin, -720, 840);
+
+    prefs.putString("ntpServer", ntpServer);
+    prefs.putInt("tzOffsetMin", tzOffsetMin);
+
     setupTime();   // pick up a changed server or offset immediately
-    server.send(200, "text/plain", "Saved!");
+    server.send(200, "text/plain", "Clock saved");
 }
 
 void handleAPI_Schedule() {
@@ -3019,7 +3073,7 @@ void handleAPI_Schedule() {
     server.send(ok ? 200 : 400, "text/plain", reply);
 }
 
-void handleAPI_TimerStatus() {
+void handleAPI_Settings() {
     String json = "{";
     json.reserve(320);
     json += "\"timeValid\":" + String(timeValid ? "true" : "false") + ",";
@@ -3379,8 +3433,11 @@ void setup() {
     server.on("/api/telegram/test",  handleAPI_TelegramTest);
     server.on("/api/telegram/discover", handleAPI_TelegramDiscover);
     server.on("/api/timers",       handleAPI_Timers);
+    server.on("/api/heater",       handleAPI_HeaterCfg);
+    server.on("/api/alerts",       handleAPI_Alerts);
+    server.on("/api/clock",        handleAPI_Clock);
     server.on("/api/schedule",     handleAPI_Schedule);
-    server.on("/api/timers/status",handleAPI_TimerStatus);
+    server.on("/api/settings",     handleAPI_Settings);
     server.on("/api/ota/status",   handleAPI_OTAStatus);
     server.on("/api/ota/config",   handleAPI_OTAConfig);
     // WebServer discards any header not listed here.
