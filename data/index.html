@@ -96,14 +96,20 @@
         
         .tab {
             flex: 1;
-            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+            padding: 10px 2px;
             text-align: center;
             border-radius: 8px;
             cursor: pointer;
             transition: all 0.3s;
             font-weight: 500;
-            font-size: 0.9rem;
+            font-size: 0.8rem;
+            line-height: 1.1;
         }
+        .tab .ic { font-size: 1.15rem; line-height: 1; }
         .tab:hover { background: rgba(255, 107, 0, 0.1); }
         .tab.active { background: rgba(255, 107, 0, 0.2); border: 1px solid rgba(255, 107, 0, 0.3); color: #ff6b00; }
         
@@ -189,6 +195,9 @@
         /* Fields of one section sit close together; the space that separates
            them from the next section lives on the heading below. */
         .field { margin-bottom: 10px; }
+        /* A button carries no bottom margin of its own, so whatever follows
+           one would otherwise sit straight against it. */
+        button + .field { margin-top: 12px; }
 
         .subhead {
             font-size: 1rem;
@@ -382,7 +391,8 @@
             .controls { grid-template-columns: repeat(2, 1fr); gap: 10px; }
             button { padding: 12px; font-size: 0.9rem; }
             .tabs { gap: 3px; padding: 4px; }
-            .tab { padding: 8px 4px; font-size: 0.75rem; }
+            .tab { padding: 8px 2px; font-size: 0.7rem; gap: 4px; }
+            .tab .ic { font-size: 1.05rem; }
             .settings-panel { margin-top: 20px; padding: 20px; }
             .settings-title { font-size: 1.3rem; }
             .cloud-device-id { font-size: 1.3rem; }
@@ -477,13 +487,13 @@
 
         <!-- TABS -->
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('pairing',this)">🔗 Pairing</div>
-            <div class="tab" onclick="switchTab('wifi',this)">📡 WiFi</div>
-            <div class="tab" onclick="switchTab('mqtt',this)">📨 MQTT</div>
-            <div class="tab" onclick="switchTab('telegram',this)">✈️ Telegram</div>
-            <div class="tab" onclick="switchTab('timers',this)">⏱ Timers</div>
-            <div class="tab" onclick="switchTab('ota',this)">⬆ OTA</div>
-            <div class="tab" onclick="switchTab('system',this)">⚙️ System</div>
+            <div class="tab active" onclick="switchTab('pairing',this)"><span class="ic">🔗</span>Pairing</div>
+            <div class="tab" onclick="switchTab('wifi',this)"><span class="ic">📡</span>WiFi</div>
+            <div class="tab" onclick="switchTab('mqtt',this)"><span class="ic">📨</span>MQTT</div>
+            <div class="tab" onclick="switchTab('telegram',this)"><span class="ic">✈️</span>Telegram</div>
+            <div class="tab" onclick="switchTab('timers',this)"><span class="ic">⏱</span>Timers</div>
+            <div class="tab" onclick="switchTab('ota',this)"><span class="ic">⬆</span>OTA</div>
+            <div class="tab" onclick="switchTab('system',this)"><span class="ic">⚙️</span>System</div>
         </div>
 
         <!-- PAIRING TAB -->
@@ -504,7 +514,7 @@
                 <button onclick="autoPair()">🔍 AUTO PAIR</button>
                 <div class="field">
                     <label class="lbl">Heater address</label>
-                    <input type="text" id="manualAddr" placeholder="Manual Address (0xCA00445B)" style="margin-top:12px;">
+                    <input type="text" id="manualAddr" placeholder="Manual Address (0xCA00445B)">
                 </div>
                 <button onclick="manualPair()">✏️ MANUAL PAIR</button>
                 <div class="info" id="pairProgress" style="display:none;">
