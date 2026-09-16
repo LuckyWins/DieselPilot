@@ -1309,9 +1309,70 @@ static void tgSendStatus(int64_t chatId) {
     tgBot.sendTo(chatId, tgStatusText(), kb.getJSON());
 }
 
+// Buttons that sit under the text field for good. Telegram keeps a reply
+// keyboard until the bot sends a different one, so this goes out once with
+// the greeting and is never attached to another message.
+//
+// Six is deliberate: the things worth reaching without thinking. Everything
+// that takes an argument -- /at 06:30, /for 90 -- cannot be a button at all,
+// which is what the help button is for.
+static String tgKeyboardJson() {
+    ReplyKeyboard kb;
+    kb.addButton("🔥 On");
+    kb.addButton("❄️ Off");
+    kb.addButton("🔄 Status");
+    kb.addRow();
+    kb.addButton("⛽ Tank");
+    kb.addButton("📊 Stats");
+    kb.addButton("❓ Help");
+    kb.enableResize();      // not one-time: it is meant to stay
+    return kb.getJSON();
+}
+
+// A button arrives as its own label, so labels are folded into the commands
+// they stand for before anything else looks at them.
+static String tgCanonical(const String& text) {
+    if(text == "🔥 On")     return "/on";
+    if(text == "❄️ Off")    return "/off";
+    if(text == "🔄 Status") return "/status";
+    if(text == "⛽ Tank")   return "/tank";
+    if(text == "📊 Stats")  return "/stats";
+    if(text == "❓ Help")   return "/help";
+    return text;
+}
+
+static void tgSendHelp(int64_t chatId) {
+    tgBot.sendTo(chatId,
+        "The buttons cover the everyday ones. These take a value, so they "
+        "have to be typed:\n\n"
+        "/at 06:30 - start at that time\n"
+        "/in 2h - start after that delay\n"
+        "/cancel - drop a pending scheduled start\n"
+        "/for 90 - run for 90 minutes this time only\n"
+        "/level 4 - set the power level (MANUAL)\n"
+        "/temp 22 - set the target temperature (AUTO)\n"
+        "/filled - tank filled up, /filled 10 - ten litres added\n"
+        "/service done - reset the counters since the last service\n"
+        "\nAnd the rest:\n\n"
+        "/status - current readings and buttons\n"
+        "/on - start the heater\n"
+        "/off - stop it (a purge follows)\n"
+        "/tank - what is left in the tank\n"
+        "/stats - hours, fuel and starts\n"
+        "/ign - how the last few starts went\n"
+        "/id - show your chat id",
+        tgKeyboardJson());
+}
+
 static void tgHandleCommand(int64_t chatId, const String& cmd) {
-    if(cmd == "st" || cmd == "/status" || cmd == "/start") {
+    if(cmd == "st" || cmd == "/status") {
         tgSendStatus(chatId);
+        return;
+    }
+
+    // First contact, and the one moment the keyboard is guaranteed to be sent.
+    if(cmd == "/start" || cmd == "/help") {
+        tgSendHelp(chatId);
         return;
     }
 
@@ -1319,26 +1380,6 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
         char buf[32];
         snprintf(buf, sizeof(buf), "%lld", (long long)chatId);
         tgBot.sendTo(chatId, "Your chat id: " + String(buf));
-        return;
-    }
-
-    if(cmd == "/help") {
-        tgBot.sendTo(chatId,
-            "/status - current readings and buttons\n"
-            "/on - start the heater\n"
-            "/off - stop it (a purge follows)\n"
-            "/at 06:30 - start at that time\n"
-            "/in 2h - start after that delay\n"
-            "/cancel - drop a pending scheduled start\n"
-            "/for 90 - run for 90 minutes this time only\n"
-            "/level 4 - set the power level (MANUAL)\n"
-            "/temp 22 - set the target temperature (AUTO)\n"
-            "/stats - hours, fuel and starts\n"
-            "/ign - how the last few starts went\n"
-            "/service done - reset the counters since the last service\n"
-            "/tank - what is left in the tank\n"
-            "/filled - tank filled up, /filled 10 - ten litres added\n"
-            "/id - show your chat id");
         return;
     }
 
@@ -1461,6 +1502,18 @@ static void tgHandleCommand(int64_t chatId, const String& cmd) {
         return;
     }
 
+    bool heaterCommand = (cmd == "on" || cmd == "/on" || cmd == "off" ||
+                          cmd == "/off" || cmd == "up" || cmd == "dn" ||
+                          cmd == "md");
+
+    // Anything unrecognised gets the list. Silence after a typo reads as a
+    // bot that has stopped working, which is the wrong thing to wonder about
+    // from a hundred kilometres away.
+    if(!heaterCommand) {
+        tgSendHelp(chatId);
+        return;
+    }
+
     if(!heaterPaired) {
         tgBot.sendTo(chatId, "Heater is not paired.");
         return;
@@ -1516,7 +1569,7 @@ void updateTelegramCommands() {
 
     lastTgActivityMs = millis();
     if(msg.messageType == MessageQuery) tgBot.endQuery(msg, "");
-    tgHandleCommand(msg.chatId, text);
+    tgHandleCommand(msg.chatId, tgCanonical(text));
 }
 
 // Keeps the keyboard responsive while it is being used without paying for
