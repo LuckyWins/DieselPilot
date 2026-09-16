@@ -189,8 +189,15 @@ Plain PlatformIO works too: `pio run -t upload`, `pio run -t uploadfs`,
 > After changing `data/index.html`, run `make flash-fs` again. Flashing the
 > firmware does not touch the filesystem partition.
 
-**Partitions.** The built-in `default.csv` table gives two app partitions
-(`app0`/`app1`, needed for OTA) plus roughly 1.5 MB of LittleFS.
+**Partitions.** The built-in `min_spiffs.csv` table gives two 1.875 MB app
+partitions (`app0`/`app1`, needed for OTA) plus 128 KB of LittleFS. The stock
+`default.csv` splits the same flash the other way round — 1.25 MB app slots
+and 1.375 MB of filesystem — which suits a project whose data outweighs its
+code. This one is the opposite: the firmware fills its slot while `data/`
+holds a single 54 KB page.
+
+A partition table is written over USB together with the bootloader and cannot
+be changed over the air, so it is chosen before the board is installed.
 
 **On Apple Silicon**, building the LittleFS image needs Rosetta 2, because the
 `mklittlefs` tool shipped with the espressif32 platform is x86_64 only:
@@ -221,7 +228,7 @@ repository under GNU GPL v3; this firmware stays MIT.
 | Image        | Offset     |
 |--------------|------------|
 | firmware.bin | `0x10000`  |
-| littlefs.bin | `0x290000` |
+| littlefs.bin | `0x3D0000` |
 
 > The very first flash of a blank chip — bootloader and partition table — has
 > to be done with PlatformIO. The tool only writes partitions at `0x10000` and
