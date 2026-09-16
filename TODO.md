@@ -25,8 +25,6 @@ here; this is only what to come back to.
       — two poll intervals — is long enough for a step to show up in the
       reading.
 
-- [ ] **The display's I2C address.** U8g2 defaults to 0x3C. If the module is
-      strapped to 0x3D it needs `display.setI2CAddress(0x3D * 2)`.
 - [ ] **Whether MTS hands out a public IP.** `curl -4 ifconfig.me` against the
       modem's WAN address; anything in 100.64.0.0/10 is CGNAT. Only relevant
       if direct access from the internet ever comes back on the table.

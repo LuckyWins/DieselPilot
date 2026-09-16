@@ -173,6 +173,10 @@ byte myAddrV1[3] = {0x19, 0x52, 0x4B};
 // 132 px buffer with an offset of 2, so its driver would shift the image.
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 
+// False when nothing answered on the bus. Everything that draws checks it:
+// the panel is a convenience, and the controller has to run without one.
+bool displayPresent = false;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBAL VARIABLES
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2352,8 +2356,41 @@ void publishMQTT() {
 // DISPLAY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Finds the panel before handing it to U8g2.
+//
+// display.begin() blocks for ever on a bus nobody answers, and an unpowered
+// module holds the lines down through its protection diodes rather than
+// letting go of them. This runs before the watchdog is armed, so a display
+// that died took the whole controller with it -- and a heater is attached to
+// that controller. The same hole was closed for the CC1101 in d73f1d4; the
+// display kept it.
+//
+// Probing both addresses also settles which one this panel uses, instead of
+// leaving it as a thing to discover by seeing a blank screen.
+void setupDisplay() {
+#if USE_OLED
+    Wire.begin(PIN_SDA, PIN_SCL);
+    Wire.setTimeOut(50);
+
+    const uint8_t candidates[] = { 0x3C, 0x3D };
+    for(uint8_t i = 0; i < sizeof(candidates); i++) {
+        Wire.beginTransmission(candidates[i]);
+        if(Wire.endTransmission() != 0) continue;
+
+        display.setI2CAddress(candidates[i] << 1);   // U8g2 wants it shifted
+        display.begin();
+        display.setContrast(255);
+        displayPresent = true;
+        Serial.printf("✅ OLED at 0x%02X\n", candidates[i]);
+        return;
+    }
+    Serial.println("⚠️ No OLED answered on I2C — carrying on without one");
+#endif
+}
+
 void updateDisplay() {
 #if USE_OLED
+    if(!displayPresent) return;
     display.clearBuffer();
     display.drawFrame(0, 0, 128, 12);
     display.setFont(u8g2_font_6x10_tf);
@@ -2917,14 +2954,12 @@ void setup() {
     }
 
 #if USE_OLED
-    Wire.begin(PIN_SDA, PIN_SCL);
-    display.begin(); display.setContrast(255);
+    setupDisplay();
     displayLine1 = "Diesel Pilot";
     displayLine2 = "V" + version + " Starting";
     displayLine3 = "Made by PPTG";
     displayLine4 = "Happy Heating :)";
     updateDisplay();
-    Serial.println("✅ OLED initialized");
     delay(2000);
 #endif
 
