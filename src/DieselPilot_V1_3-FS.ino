@@ -427,6 +427,78 @@ inline void feedWatchdog() {
 // Returns false and releases CS if the module did not answer. Protocol
 // semantics for a healthy module are unchanged: the loop still exits on
 // exactly the same condition as before.
+// The crystal has to start before the chip will answer anything, which takes
+// far longer than an ordinary bus turnaround.
+#define CC1101_RESET_TIMEOUT_US 50000
+
+// Plain wait on SO, with none of waitReady()'s side effects: during a reset a
+// chip that is not yet ready is the normal case, not a fault to record.
+static bool cc1101_waitMisoLow(uint32_t timeoutUs) {
+    uint32_t t0 = micros();
+    while(digitalRead(PIN_MISO)) {
+        if(micros() - t0 > timeoutUs) return false;
+    }
+    return true;
+}
+
+// One byte clocked out by hand, MSB first, SPI mode 0: data set while the
+// clock is low, sampled by the chip on the rising edge.
+static void cc1101_bitbangByte(uint8_t v) {
+    for(int i = 7; i >= 0; i--) {
+        digitalWrite(PIN_MOSI, (v >> i) & 1);
+        delayMicroseconds(1);
+        digitalWrite(PIN_SCK, HIGH);
+        delayMicroseconds(1);
+        digitalWrite(PIN_SCK, LOW);
+        delayMicroseconds(1);
+    }
+}
+
+// Manual reset, CC1101 datasheet section 19.1.
+//
+// The chip has an automatic power-on reset, but it only works when the supply
+// rises quickly and cleanly. On a breadboard it often does not, and the chip
+// comes up in a state where SO never falls -- so it never reports ready, and
+// every ordinary strobe in this driver refuses to send anything, including
+// the SRES that would have fixed it. This sequence breaks that circle: it
+// runs on plain GPIO and does not wait for readiness before touching CSn.
+static bool cc1101_manualReset() {
+    SPI.end();
+
+    pinMode(PIN_SCK,  OUTPUT);
+    pinMode(PIN_MOSI, OUTPUT);
+    pinMode(PIN_MISO, INPUT);
+    pinMode(PIN_SS,   OUTPUT);
+
+    // Step 1: SCLK high, SI low, so a chip that woke up in pin control mode
+    // cannot mistake these lines for GDO outputs.
+    digitalWrite(PIN_SS,   HIGH);
+    digitalWrite(PIN_SCK,  HIGH);
+    digitalWrite(PIN_MOSI, LOW);
+    delayMicroseconds(10);
+
+    // Steps 2 and 3: strobe CSn, then hold it high for at least 40 us.
+    digitalWrite(PIN_SS, LOW);
+    delayMicroseconds(10);
+    digitalWrite(PIN_SS, HIGH);
+    delayMicroseconds(50);
+
+    // Step 4: select the chip and wait for it to say it is awake.
+    digitalWrite(PIN_SS, LOW);
+    digitalWrite(PIN_SCK, LOW);            // mode 0 idles the clock low
+    bool ok = cc1101_waitMisoLow(CC1101_RESET_TIMEOUT_US);
+
+    if(ok) {
+        cc1101_bitbangByte(0x30);          // step 5: SRES
+        // Step 6: the reset is complete when SO falls a second time.
+        ok = cc1101_waitMisoLow(CC1101_RESET_TIMEOUT_US);
+    }
+
+    digitalWrite(PIN_SS, HIGH);
+    SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_SS);
+    return ok;
+}
+
 static bool cc1101_waitReady() {
     uint32_t t0 = micros();
     while(digitalRead(PIN_MISO)) {
@@ -472,6 +544,74 @@ uint8_t cc1101_readReg(uint8_t addr) {
     return val;
 }
 
+// Works out why the module is silent, which VERSION alone cannot say.
+//
+// cc1101_readReg() returns 0 both when the data coming back is genuinely
+// zero and when the readiness wait timed out before a single bit moved, so a
+// failed self-test on its own is ambiguous. This tells the two apart without
+// a meter, by asking who wins the line: an idle CC1101 releases SO while CSn
+// is high and drives it while CSn is low, so an internal pull that loses the
+// argument means something out there is driving, and one that wins means
+// nothing is.
+static void cc1101_diagnose() {
+    digitalWrite(PIN_SS, HIGH);
+    delayMicroseconds(50);
+
+    pinMode(PIN_MISO, INPUT_PULLDOWN);
+    delayMicroseconds(200);
+    bool idleWithPulldown = digitalRead(PIN_MISO);
+    pinMode(PIN_MISO, INPUT_PULLUP);
+    delayMicroseconds(200);
+    bool idleWithPullup = digitalRead(PIN_MISO);
+
+    // Selecting the chip is what makes a live CC1101 take the line over.
+    digitalWrite(PIN_SS, LOW);
+    delayMicroseconds(50);
+
+    pinMode(PIN_MISO, INPUT_PULLDOWN);
+    delayMicroseconds(200);
+    bool selWithPulldown = digitalRead(PIN_MISO);
+    pinMode(PIN_MISO, INPUT_PULLUP);
+    delayMicroseconds(200);
+    bool selWithPullup = digitalRead(PIN_MISO);
+
+    digitalWrite(PIN_SS, HIGH);
+    pinMode(PIN_MISO, INPUT);
+
+    Serial.printf("   MISO idle: pulldown=%d pullup=%d | selected: pulldown=%d pullup=%d\n",
+                  idleWithPulldown, idleWithPullup, selWithPulldown, selWithPullup);
+
+    // Read VERSION again, this time ignoring the readiness signal. The chip's
+    // SPI shift register is clocked by our SCK, not by its crystal, so a chip
+    // whose oscillator never started should still answer here. That separates
+    // a dead crystal from a data path that was never wired correctly.
+    digitalWrite(PIN_SS, LOW);
+    delayMicroseconds(20);
+    SPI.transfer(0xF1);
+    uint8_t forced = SPI.transfer(0xFF);
+    digitalWrite(PIN_SS, HIGH);
+    Serial.printf("   VERSION ignoring the ready signal: 0x%02X"
+                  "  (0x14 is what a live CC1101 answers)\n", forced);
+
+    bool floatsWhileSelected = (selWithPulldown == 0) && (selWithPullup == 1);
+
+    if(floatsWhileSelected) {
+        Serial.println("   -> nothing is driving MISO. The module is unpowered, "
+                       "not connected, or dead.");
+        Serial.println("      Check VCC and GND at the module, and the MISO wire "
+                       "itself.");
+    } else if(selWithPulldown == 1) {
+        Serial.println("   -> the module is driving MISO high and never releases "
+                       "it: it is powered and wired, but not ready.");
+        Serial.println("      The reset above having failed too, that leaves "
+                       "the crystal or the supply at the module itself.");
+    } else {
+        Serial.println("   -> the module drives MISO low, so it is alive and "
+                       "ready. The fault is in the rest of the bus.");
+        Serial.println("      Check SCK, MOSI and CSn.");
+    }
+}
+
 // Presence check via the VERSION register.
 //
 // The readiness wait alone is not enough: it only catches the case where
@@ -483,6 +623,7 @@ static bool cc1101_selfTest() {
     if(version == 0x00 || version == 0xFF) {
         cc1101Fault = true;
         Serial.printf("❌ CC1101 self-test failed: VERSION=0x%02X\n", version);
+        cc1101_diagnose();
         return false;
     }
     Serial.printf("✅ CC1101 present: VERSION=0x%02X\n", version);
@@ -494,7 +635,10 @@ static bool cc1101_selfTest() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void cc1101_init() {
-    cc1101_strobe(0x30); delay(100);
+    if(!cc1101_manualReset()) {
+        Serial.println("⚠️ CC1101 did not answer the reset sequence");
+    }
+    delay(100);
     cc1101_writeReg(0x00, 0x07); cc1101_writeReg(0x02, 0x06);
     cc1101_writeReg(0x03, 0x47); cc1101_writeReg(0x07, 0x04);
     cc1101_writeReg(0x08, 0x05); cc1101_writeReg(0x0A, 0x00);
@@ -518,11 +662,14 @@ void cc1101_init() {
     cc1101_writeBurst(0x7E, 8, paTable);
     cc1101_strobe(0x31); cc1101_strobe(0x36); cc1101_strobe(0x3B);
     cc1101_strobe(0x36); cc1101_strobe(0x3A); delay(136);
-    Serial.println("✅ CC1101 initialized @ 433.937 MHz (V2)");
+    Serial.println("   CC1101 registers written @ 433.937 MHz (V2)");
 }
 
 void cc1101_init_V1() {
-    cc1101_strobe(0x30); delay(100);
+    if(!cc1101_manualReset()) {
+        Serial.println("⚠️ CC1101 did not answer the reset sequence");
+    }
+    delay(100);
     const byte configRegsV1[] = {
         0x0B, 0x06, 0x0D, 0x10, 0x0E, 0xB0, 0x0F, 0x71,
         0x10, 0x86, 0x11, 0x83, 0x12, 0x12, 0x13, 0x22,
@@ -532,7 +679,7 @@ void cc1101_init_V1() {
     for(int i = 0; i < sizeof(configRegsV1); i += 2)
         cc1101_writeReg(configRegsV1[i], configRegsV1[i+1]);
     cc1101_strobe(0x36); delay(5); cc1101_strobe(0x34);
-    Serial.println("✅ CC1101 initialized @ 433.920 MHz (V1)");
+    Serial.println("   CC1101 registers written @ 433.920 MHz (V1)");
 }
 
 void cc1101_applyConfig() {
